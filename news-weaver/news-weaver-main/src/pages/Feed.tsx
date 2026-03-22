@@ -4,6 +4,7 @@ import { Search, Play } from "lucide-react";
 import { fetchArticles, fetchArticleImage, runPipeline, fetchAnalytics } from "@/lib/api";
 import ArticleModal from "@/components/ArticleModal";
 import { formatDistanceToNow } from "date-fns";
+import { toast } from "sonner";
 
 export default function Feed() {
   const [search, setSearch] = useState("");
@@ -26,7 +27,15 @@ export default function Feed() {
 
   const pipeline = useMutation({
     mutationFn: runPipeline,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["articles"] }),
+    onSuccess: (data) => {
+      if (data?.statusCode === 409) {
+        toast.warning("Pipeline is already running");
+      } else {
+        toast.success("Pipeline started successfully");
+      }
+      queryClient.invalidateQueries({ queryKey: ["articles"] });
+    },
+    onError: () => toast.error("Failed to connect to API — is Flask running?"),
   });
 
   const scoreColor = (score: number) =>
@@ -159,6 +168,25 @@ export default function Feed() {
               </div>
             </button>
           ))}
+
+          {!isLoading && Array.isArray(articles) && articles.length === 0 && (
+            <div className="col-span-2 flex flex-col items-center justify-center py-24 text-center">
+              <p className="text-base font-semibold text-foreground">No articles found</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {statusFilter || search || categoryFilter
+                  ? "Try clearing your filters"
+                  : "Run the pipeline to discover and process articles"}
+              </p>
+              <button
+                onClick={() => pipeline.mutate()}
+                disabled={pipeline.isPending}
+                className="mt-4 flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                <Play className="h-4 w-4" />
+                {pipeline.isPending ? "Running..." : "Run Pipeline Now"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

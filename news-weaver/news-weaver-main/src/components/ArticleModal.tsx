@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { X, Copy, Check } from "lucide-react";
+import { fetchArticle } from "@/lib/api";
 
 interface ArticleModalProps {
   article: any;
@@ -14,10 +16,23 @@ export default function ArticleModal({ article, onClose }: ArticleModalProps) {
 
   if (!article) return null;
 
-  const summaries = article.summaries ?? article.platform_summaries ?? {};
-  const imageUrl = article.image_url
-    ? `http://localhost:5000/api/articles/${article.id}/image`
-    : null;
+  const { data: fullArticle } = useQuery({
+    queryKey: ["article", article.id],
+    queryFn: () => fetchArticle(article.id),
+    enabled: !!article.id,
+    staleTime: 60000,
+  });
+
+  const data = fullArticle ?? article;
+  const raw = data.summary ?? {};
+  const summaries: Record<string, string> = {
+    twitter:   raw.twitter_text        ?? "",
+    linkedin:  raw.linkedin_text       ?? "",
+    instagram: raw.instagram_caption   ?? "",
+    facebook:  raw.facebook_text       ?? "",
+  };
+  const hashtags: string = raw.hashtags ?? "";
+  const imageUrl = `/api/articles/${article.id}/image`;
 
   const handleCopy = () => {
     const text = summaries[activeTab] ?? "";
@@ -33,14 +48,12 @@ export default function ArticleModal({ article, onClose }: ArticleModalProps) {
         onClick={(e) => e.stopPropagation()}
       >
         {/* Image */}
-        {imageUrl && (
-          <img
-            src={imageUrl}
-            alt={article.headline}
-            className="h-56 w-full rounded-t-xl object-cover"
-            onError={(e) => (e.currentTarget.style.display = "none")}
-          />
-        )}
+        <img
+          src={imageUrl}
+          alt={data.headline}
+          className="h-56 w-full rounded-t-xl object-cover"
+          onError={(e) => (e.currentTarget.style.display = "none")}
+        />
 
         {/* Close button */}
         <button
@@ -52,30 +65,19 @@ export default function ArticleModal({ article, onClose }: ArticleModalProps) {
 
         <div className="p-6 space-y-4">
           {/* Header */}
-          <h2 className="text-xl font-bold leading-tight text-foreground">{article.headline}</h2>
+          <h2 className="text-xl font-bold leading-tight text-foreground">{data.headline}</h2>
 
           <div className="flex flex-wrap items-center gap-2">
-            {article.source && (
-              <span className="platform-badge bg-secondary text-secondary-foreground">{article.source}</span>
+            {data.source && (
+              <span className="platform-badge bg-secondary text-secondary-foreground">{data.source}</span>
             )}
-            {article.category && (
-              <span className="platform-badge bg-primary/15 text-primary">{article.category}</span>
+            {data.category && (
+              <span className="platform-badge bg-primary/15 text-primary">{data.category}</span>
             )}
-            {article.viral_score != null && (
-              <span className="text-xs text-muted-foreground">Score: {article.viral_score}</span>
+            {data.viral_score != null && (
+              <span className="text-xs text-muted-foreground">Score: {data.viral_score}</span>
             )}
           </div>
-
-          {/* Tags */}
-          {article.tags?.length > 0 && (
-            <div className="flex flex-wrap gap-1.5">
-              {article.tags.map((tag: string) => (
-                <span key={tag} className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
-                  #{tag}
-                </span>
-              ))}
-            </div>
-          )}
 
           {/* Platform tabs */}
           <div className="space-y-3">
@@ -97,7 +99,7 @@ export default function ArticleModal({ article, onClose }: ArticleModalProps) {
 
             <div className="relative rounded-lg bg-muted p-4">
               <p className="pr-8 text-sm leading-relaxed text-foreground whitespace-pre-wrap">
-                {summaries[activeTab] || "No summary available for this platform."}
+                {summaries[activeTab] || "No summary available — run the pipeline to generate social content."}
               </p>
               <button
                 onClick={handleCopy}
@@ -108,6 +110,17 @@ export default function ArticleModal({ article, onClose }: ArticleModalProps) {
               </button>
             </div>
           </div>
+
+          {/* Hashtags */}
+          {hashtags && (
+            <div className="flex flex-wrap gap-1.5 pt-2">
+              {hashtags.split(",").map((tag: string) => (
+                <span key={tag.trim()} className="rounded bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                  {tag.trim()}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>

@@ -376,6 +376,28 @@ def get_pending_posts():
         return jsonify({"error": "Database error fetching pending posts", "details": str(e)}), 500
 
 
+@app.route('/api/posts/queued', methods=['GET'])
+def get_queued_posts():
+    try:
+        query = """
+            SELECT 
+                a.id, a.headline, a.source, a.category, a.viral_score, a.is_breaking,
+                s.twitter_text, s.linkedin_text, s.instagram_caption, s.facebook_text, s.hashtags
+            FROM articles a
+            LEFT JOIN summaries s ON a.id = s.article_id
+            WHERE a.status = 'publish_approved'
+            ORDER BY a.viral_score DESC
+            LIMIT 50
+        """
+        with engine.connect() as conn:
+            result = conn.execute(text(query))
+            articles = [dict(row) for row in result.mappings()]
+            
+        return jsonify(articles), 200
+    except Exception as e:
+        return jsonify({"error": "Database error fetching queued posts", "details": str(e)}), 500
+
+
 @app.route('/api/posts/<int:article_id>/approve', methods=['POST'])
 def approve_post(article_id):
     try:

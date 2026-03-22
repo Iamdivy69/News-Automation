@@ -1,10 +1,12 @@
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchPipelineStatus, runPipeline, fetchPipelineHistory,
-  fetchPendingApproval, approvePost, rejectPost,
+  fetchPendingApproval, fetchQueuedPosts, approvePost, rejectPost,
 } from "@/lib/api";
 import { Play, CheckCircle, XCircle, Clock, Zap } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import { toast } from "sonner";
 
 export default function ControlPanel() {
   const queryClient = useQueryClient();
@@ -27,22 +29,44 @@ export default function ControlPanel() {
     refetchInterval: 30000,
   });
 
+  const { data: queuedArticles = [] } = useQuery({
+    queryKey: ["queuedPosts"],
+    queryFn: fetchQueuedPosts,
+    refetchInterval: 30000,
+  });
+
+  const [activeTab, setActiveTab] = useState<"approval" | "queued">("approval");
+
   const pipelineMutation = useMutation({
     mutationFn: runPipeline,
-    onSuccess: () => {
+    onSuccess: (data) => {
+      if (data?.statusCode === 409) {
+        toast.warning("Pipeline is already running");
+      } else {
+        toast.success("Pipeline started — check status above");
+      }
       queryClient.invalidateQueries({ queryKey: ["pipelineStatus"] });
       queryClient.invalidateQueries({ queryKey: ["pipelineHistory"] });
     },
+    onError: () => toast.error("Failed to start pipeline"),
   });
 
   const approveMutation = useMutation({
-    mutationFn: approvePost,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["articles"] }),
+    mutationFn: (id: string | number) => approvePost(id),
+    onSuccess: () => {
+      toast.success("Article approved for publishing");
+      queryClient.invalidateQueries({ queryKey: ["pendingApproval"] });
+    },
+    onError: () => toast.error("Approve failed"),
   });
 
   const rejectMutation = useMutation({
-    mutationFn: rejectPost,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["articles"] }),
+    mutationFn: (id: string | number) => rejectPost(id),
+    onSuccess: () => {
+      toast.warning("Article rejected");
+      queryClient.invalidateQueries({ queryKey: ["pendingApproval"] });
+    },
+    onError: () => toast.error("Reject failed"),
   });
 
   const lastRun = status?.last_run ?? {};
@@ -95,46 +119,80 @@ export default function ControlPanel() {
         </button>
       </div>
 
-      {/* Approval queue */}
+      {/* Queues Section */}
       <div className="rounded-lg border border-border bg-card p-6">
-        <h3 className="mb-4 text-lg font-semibold text-foreground">Approval Queue</h3>
-        <div className="space-y-3">
-          {(Array.isArray(pendingArticles) ? pendingArticles : []).map((article: any) => (
-            <div
-              key={article.id}
-              className="flex items-center justify-between rounded-lg bg-muted/50 p-4"
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="text-lg font-semibold text-foreground">Content Queues</h3>
+          <div className="flex gap-2">
+            <button
+              onClick={() => setActiveTab("approval")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeTab === "approval" ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground"
+              }`}
             >
-              <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium text-foreground">{article.headline}</p>
-                <div className="mt-1 flex items-center gap-2">
-                  {article.source && (
-                    <span className="text-xs text-muted-foreground">{article.source}</span>
-                  )}
-                  {article.viral_score != null && (
-                    <span className="text-xs text-primary">Score: {article.viral_score}</span>
-                  )}
+              Needs Approval ({(Array.isArray(pendingArticles) ? pendingArticles : []).length})
+            </button>
+            <button
+              onClick={() => setActiveTab("queued")}
+              className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeTab === "queued" ? "bg-primary text-primary-foreground" : "bg-muted text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Publishing Queue ({(Array.isArray(queuedArticles) ? queuedArticles : []).length})
+            </button>
+          </div>
+        </div>
+
+        <div className="space-y-3">
+          {activeTab === "approval" ? (
+            // Approval Queue List
+            <>
+              {(Array.isArray(pendingArticles) ? pendingArticles : []).map((article: any) => (
+                <div key={article.id} className="flex items-center justify-between rounded-lg bg-muted/50 p-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-foreground">{article.headline}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      {article.source && <span className="text-xs text-muted-foreground">{article.source}</span>}
+                      {article.viral_score != null && <span className="text-xs text-primary">Score: {article.viral_score}</span>}
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button onClick={() => approveMutation.mutate(article.id)} className="rounded-md bg-success/15 p-2 text-success transition-colors hover:bg-success/25 active:scale-95" title="Approve">
+                      <CheckCircle className="h-4 w-4" />
+                    </button>
+                    <button onClick={() => rejectMutation.mutate(article.id)} className="rounded-md bg-destructive/15 p-2 text-destructive transition-colors hover:bg-destructive/25 active:scale-95" title="Reject">
+                      <XCircle className="h-4 w-4" />
+                    </button>
+                  </div>
                 </div>
-              </div>
-              <div className="flex shrink-0 gap-2">
-                <button
-                  onClick={() => approveMutation.mutate(article.id)}
-                  className="rounded-md bg-success/15 p-2 text-success transition-colors hover:bg-success/25 active:scale-95"
-                >
-                  <CheckCircle className="h-4 w-4" />
-                </button>
-                <button
-                  onClick={() => rejectMutation.mutate(article.id)}
-                  className="rounded-md bg-destructive/15 p-2 text-destructive transition-colors hover:bg-destructive/25 active:scale-95"
-                >
-                  <XCircle className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-          ))}
-          {(Array.isArray(pendingArticles) ? pendingArticles : []).length === 0 && (
-            <p className="py-4 text-center text-sm text-muted-foreground">
-              No articles pending approval
-            </p>
+              ))}
+              {(Array.isArray(pendingArticles) ? pendingArticles : []).length === 0 && (
+                <p className="py-4 text-center text-sm text-muted-foreground">No articles pending approval</p>
+              )}
+            </>
+          ) : (
+            // Publishing Queue List
+            <>
+              {(Array.isArray(queuedArticles) ? queuedArticles : []).map((article: any) => (
+                <div key={article.id} className="flex items-center justify-between rounded-lg bg-muted/50 p-4">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-foreground">{article.headline}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      {article.source && <span className="text-xs text-muted-foreground">{article.source}</span>}
+                      <span className="text-xs text-primary">Publishing next cycle</span>
+                    </div>
+                  </div>
+                  <div className="flex shrink-0 gap-2">
+                    <button onClick={() => rejectMutation.mutate(article.id)} className="rounded-md bg-destructive/15 p-2 text-destructive transition-colors hover:bg-destructive/25 active:scale-95" title="Cancel & Reject">
+                      <XCircle className="h-4 w-4" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {(Array.isArray(queuedArticles) ? queuedArticles : []).length === 0 && (
+                <p className="py-4 text-center text-sm text-muted-foreground">Publishing queue is empty</p>
+              )}
+            </>
           )}
         </div>
       </div>

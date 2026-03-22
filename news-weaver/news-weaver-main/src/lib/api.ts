@@ -1,4 +1,4 @@
-const BASE = "http://localhost:5000/api";
+const BASE = "/api";
 
 async function apiFetch(path: string, options?: RequestInit) {
   const res = await fetch(`${BASE}${path}`, {
@@ -153,6 +153,15 @@ export const fetchPosts = async (platform?: string) => {
 export const fetchPendingApproval = async () => {
   try {
     const data = await apiFetch("/posts/pending");
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+};
+
+export const fetchQueuedPosts = async () => {
+  try {
+    const data = await apiFetch("/posts/queued");
     return Array.isArray(data) ? data : [];
   } catch {
     return [];
