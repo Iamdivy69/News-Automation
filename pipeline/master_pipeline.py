@@ -23,7 +23,19 @@ class MasterPipeline:
     def run(self) -> dict:
         from datetime import datetime, timezone
         started_at = datetime.now(timezone.utc)
-        
+
+        # Phase -1: Purge stale unprocessed articles before running anything else
+        print("Phase -1: Purging stale unprocessed articles older than 12h...")
+        try:
+            from agents.news_discovery_agent import NewsDiscoveryAgent
+            disc_agent = NewsDiscoveryAgent()
+            purge_conn = self._get_conn()
+            purged = disc_agent.purge_stale_articles(purge_conn)
+            purge_conn.close()
+            print(f"  Purged {purged} stale articles")
+        except Exception as e:
+            print(f"purge_stale error (non-fatal): {e}")
+
         # 0. Auto-discard stale low-score articles before running the pipeline
         print("Phase 0: Auto-discarding low-score articles older than 6 hours...")
         try:
@@ -68,28 +80,50 @@ class MasterPipeline:
             for article in articles_for_images:
                 article_id = article["id"]
                 
-                actual_path = visual_agent.generate_headline_card(
+                output_path = visual_agent.generate_portrait_card(
                     headline=article["headline"],
                     source=article["source"],
                     category=article["category"],
-                    is_breaking=article["is_breaking"],
+                    is_breaking=article["is_breaking"] or False,
                     article_id=article_id,
-                    viral_score=article["viral_score"],
+                    viral_score=article["viral_score"] or 0,
                 )
                 
-                with self._get_conn() as save_conn:
-                    visual_agent.save_image_record(article_id, actual_path, "headline_card", save_conn)
-                    
-                images_generated_count += 1
+                if output_path:
+                    with self._get_conn() as save_conn:
+                        visual_agent.save_image_record(
+                            article_id, output_path, 'portrait', save_conn
+                        )
+                    images_generated_count += 1
                 
             conn.close()
         except Exception as e:
             print(f"Error generating visual cards: {e}")
 
+        # Phase 3b: Promoting fully-processed articles to publish_approved
+        print("Phase 3b: Promoting fully-processed articles to publish_approved...")
+        try:
+            promo_conn = self._get_conn()
+            with promo_conn:
+                with promo_conn.cursor() as cur:
+                    cur.execute('''
+                        UPDATE articles
+                        SET status = %s
+                        WHERE status = %s
+                        AND id IN (SELECT article_id FROM summaries)
+                        AND id IN (SELECT article_id FROM images)
+                    ''', ('publish_approved', 'approved'))
+                    promoted = cur.rowcount
+            promo_conn.close()
+            print(f"  Promoted {promoted} articles to publish_approved")
+            combined_summary["promoted"] = promoted
+        except Exception as e:
+            print(f"Phase 3b error (non-fatal): {e}")
+
         # 4. Run Publishing Agent
         print("Phase 4: Running Publishing Agent...")
         pub_agent = PublishingAgent()
-        published_count = pub_agent.run(limit=20)
+        published_count = pub_agent.run(limit=50)
 
         # 4. Compile Master Summary
         total_discovered = intel_summary.get("discovered", 0)

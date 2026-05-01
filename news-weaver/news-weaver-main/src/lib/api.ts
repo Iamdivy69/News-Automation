@@ -174,6 +174,9 @@ export const approvePost = async (id: string | number) =>
 export const rejectPost = async (id: string | number) =>
   apiFetch(`/posts/${id}/reject`, { method: "POST" });
 
+export const clearQueue = async () =>
+  apiFetch(`/posts/queue`, { method: "DELETE" });
+
 // ── Health ────────────────────────────────────────────────────────────────────
 
 export const fetchHealth = async () => {

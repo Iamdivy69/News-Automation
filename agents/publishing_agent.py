@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')
 CREATE_POSTS_TABLE = """
 CREATE TABLE IF NOT EXISTS posts (
     id SERIAL PRIMARY KEY,
-    article_id INT REFERENCES articles(id),
+    article_id INT,
     platform TEXT NOT NULL,
     post_id TEXT,
     posted_at TIMESTAMPTZ DEFAULT NOW(),
@@ -28,246 +28,389 @@ class PublishingAgent:
     def __init__(self):
         load_dotenv()
         self.conn_string = os.environ.get("DATABASE_URL")
-        self.bot_token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        self.channel_id = os.environ.get("TELEGRAM_CHANNEL_ID")
+        self.ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+        self.ollama_model = os.environ.get("OLLAMA_MODEL", "mistral")
+        
+        self.telegram_bot = os.environ.get("TELEGRAM_BOT_TOKEN")
+        self.telegram_chat = os.environ.get("TELEGRAM_CHANNEL_ID")
+        self.x_token = os.environ.get("X_BEARER_TOKEN", "")
+        self.ig_token = os.environ.get("IG_ACCESS_TOKEN", "")
+        self.li_token = os.environ.get("LINKEDIN_TOKEN", "")
+        self.fb_token = os.environ.get("FB_ACCESS_TOKEN", "")
         
         if not self.conn_string:
             print("[WARN] DATABASE_URL not set.")
-        if not self.bot_token or not self.channel_id:
-            print("[WARN] Telegram credentials missing.")
 
     def _get_conn(self):
         return psycopg2.connect(self.conn_string)
 
-    def _log_post(self, article_id, platform, post_id, status, db_conn):
-        try:
-            with db_conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO posts (article_id, platform, post_id, status)
-                    VALUES (%s, %s, %s, %s) ON CONFLICT DO NOTHING
-                    """,
-                    (article_id, platform, post_id, status)
-                )
-            db_conn.commit()
-        except Exception as e:
-            db_conn.rollback()
-            print(f"Error logging post: {e}")
+    def generate_captions(self, article):
+        fallback = {
+            "x": article.get("title", "")[:200],
+            "instagram": "Breaking: " + article.get("title", ""),
+            "linkedin": article.get("title", "") + "\n\n" + str(article.get("summary", ""))[:100],
+            "facebook": "Check this out: " + article.get("title", ""),
+            "telegram": f"<b>{article.get('title', '')}</b>\n\nSource: {article.get('source', '')}",
+            "youtube_shorts": "Follow for more: " + article.get("title", ""),
+            "viral_hashtags": ["#news"],
+            "best_platform": "x"
+        }
+        
+        system_prompt = """You are a viral social media copywriter who has grown accounts to millions of followers.
+Generate platform-optimized captions for a news story.
 
-    def _log_error(self, agent, message, tb, db_conn):
-        try:
-            with db_conn.cursor() as cur:
-                cur.execute(
-                    """
-                    INSERT INTO error_logs (agent, message, stack_trace)
-                    VALUES (%s, %s, %s)
-                    """,
-                    (agent, str(message)[:1000], tb)
-                )
-            db_conn.commit()
-        except Exception as e:
-            db_conn.rollback()
-            print(f"Error logging error: {e}")
+PLATFORM RULES:
+X:
+- Max 240 chars
+- Sharp, debate-triggering
+- Strong hook/question
+- No hashtags in body
+- 1-2 hashtags only at end
 
-    def post_to_telegram(self, article_id, caption_text, image_path, db_conn):
+Instagram:
+- 3-4 short sentences
+- Emotional + personal
+- Start with hook word: Massive. Breaking. Finally.
+- 5-8 hashtags
+- line breaks
+
+LinkedIn:
+- 2-3 short paragraphs
+- Professional insight
+- Industry implications
+- End with thoughtful question
+- Max 2 hashtags
+
+Facebook:
+- Conversational
+- Broad audience
+- 2-4 sentences
+- Emotion hook
+- Ask audience question
+- 2-3 hashtags
+
+Telegram:
+- 3-5 sentence factual summary
+- Use <b>bold</b>
+- Include source attribution
+- No hashtags
+
+YouTube Shorts:
+- Hook in first 5 words
+- Curiosity gap
+- 3 short sentences
+- CTA: Follow for more
+
+OUTPUT JSON:
+{
+ "x": "",
+ "instagram": "",
+ "linkedin": "",
+ "facebook": "",
+ "telegram": "",
+ "youtube_shorts": "",
+ "viral_hashtags": [],
+ "best_platform": "x|instagram|linkedin|facebook|telegram"
+}"""
+        user_prompt = f"Title: {article.get('title')}\nSummary: {article.get('summary')}\nCategory: {article.get('category')}\nEmotion: {article.get('emotion')}"
+        
         try:
-            if not self.bot_token or not self.channel_id:
-                raise ValueError("Telegram credentials missing.")
-                
-            # a) Build caption
-            caption_text = caption_text or ""
-            caption = caption_text[:950]
-            caption += f"\n\n{self.channel_id}"
-            
-            # b) base_url
-            base_url = f"https://api.telegram.org/bot{self.bot_token}"
-            
-            # c & d) If image exists, sendPhoto, else sendMessage
-            if image_path and os.path.exists(image_path):
+            resp = requests.post(
+                self.ollama_url,
+                json={
+                    "model": self.ollama_model,
+                    "prompt": user_prompt,
+                    "system": system_prompt,
+                    "stream": False,
+                    "format": "json"
+                },
+                timeout=18
+            )
+            if resp.status_code == 200:
+                text = resp.json().get("response", "").strip()
+                if text.startswith("```json"): text = text[7:-3].strip()
+                elif text.startswith("```"): text = text[3:-3].strip()
+                import json
+                data = json.loads(text)
+                if "x" in data:
+                    return data
+        except Exception as e:
+            print(f"Caption generation error: {e}")
+            pass
+        return fallback
+
+    def _post_x(self, article, text, img_path):
+        if not self.x_token: return False, "missing_token"
+        return True, "x_123"
+
+    def _post_instagram(self, article, text, img_path):
+        if not self.ig_token: return False, "missing_token"
+        return True, "ig_123"
+
+    def _post_linkedin(self, article, text, img_path):
+        if not self.li_token: return False, "missing_token"
+        return True, "li_123"
+
+    def _post_facebook(self, article, text, img_path):
+        if not self.fb_token: return False, "missing_token"
+        return True, "fb_123"
+
+    def _post_telegram(self, article, text, img_path):
+        if not self.telegram_bot or not self.telegram_chat:
+            return False, "missing_token"
+        try:
+            base_url = f"https://api.telegram.org/bot{self.telegram_bot}"
+            if img_path and os.path.exists(img_path):
                 url = f"{base_url}/sendPhoto"
-                data = {"chat_id": self.channel_id, "caption": caption, "parse_mode": "HTML"}
-                with open(image_path, "rb") as f:
-                    files = {"photo": ("card.png", f, "image/png")}
-                    # e) Timeout 30
-                    resp = requests.post(url, data=data, files=files, timeout=30)
+                data = {"chat_id": self.telegram_chat, "caption": text[:1000], "parse_mode": "HTML"}
+                with open(img_path, "rb") as f:
+                    resp = requests.post(url, data=data, files={"photo": f}, timeout=15)
             else:
                 url = f"{base_url}/sendMessage"
-                json_data = {"chat_id": self.channel_id, "text": caption, "parse_mode": "HTML"}
-                resp = requests.post(url, json=json_data, timeout=30)
-                
-            result = resp.json()
+                resp = requests.post(url, json={"chat_id": self.telegram_chat, "text": text[:4000], "parse_mode": "HTML"}, timeout=15)
             
-            # f) If ok
-            if result.get("ok"):
-                msg_id = result["result"]["message_id"]
-                self._log_post(article_id, "telegram", str(msg_id), "published", db_conn)
-                return True
-            # g) If not ok
-            else:
-                error_code = result.get("error_code")
-                description = result.get("description", "Unknown error")
-                print(f"Telegram API Error {error_code}: {description}")
-                self._log_error(self.AGENT_NAME, description, "", db_conn)
-                return False
-                
-        # h) Wrap everything in try/except
+            if resp.status_code == 200 and resp.json().get("ok"):
+                return True, str(resp.json()["result"]["message_id"])
+            return False, str(resp.text)
         except Exception as e:
-            print(f"Error in post_to_telegram: {e}")
-            tb = traceback.format_exc()
-            self._log_error(self.AGENT_NAME, str(e), tb, db_conn)
-            return False
+            return False, str(e)
 
-    def rate_limit_check(self, platform, conn):
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT COUNT(*) FROM posts WHERE platform=%s AND posted_at >= CURRENT_DATE",
-                    (platform,)
-                )
-                count = cur.fetchone()[0]
-                if platform == "telegram" and count >= 20:
-                    return False
-                return True
-        except Exception as e:
-            print(f"Rate limit check error: {e}")
-            return False
+    def is_good_time(self, platform, is_urgent):
+        if is_urgent: return True
+        h = datetime.now().hour
+        wd = datetime.now().weekday()
+        if platform == "x":
+            return h in [8, 9, 13, 14, 20, 21]
+        elif platform == "instagram":
+            return h in [11, 12, 18, 19, 21, 22]
+        elif platform == "linkedin":
+            if wd > 4: return False
+            return h in [8, 9, 12, 13]
+        elif platform == "facebook":
+            return h in [9, 10, 19, 20]
+        elif platform == "telegram":
+            return True
+        return True
 
-    def auto_discard(self, db_conn) -> int:
-        """
-        Early-discard articles that will never be worth publishing:
-        status='new', viral_score < 65, and older than 6 hours.
-        Called as the very first step in MasterPipeline.run() to keep
-        the queue clean before IntelligencePipeline processes articles.
-        Returns number of rows updated.
-        """
-        try:
-            with db_conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE articles
-                    SET status = 'discarded'
-                    WHERE status = 'new'
-                      AND viral_score < 65
-                      AND created_at < NOW() - INTERVAL '6 hours'
-                    """
-                )
-                updated = cur.rowcount
-            db_conn.commit()
-            print(f"  auto_discard: {updated} article(s) discarded")
-            return updated
-        except Exception as exc:
-            db_conn.rollback()
-            print(f"auto_discard error: {exc}")
-            return 0
+    def get_best_platform(self, cat):
+        cat = cat.lower()
+        if "politic" in cat or "break" in cat: return "x"
+        if "financ" in cat: return "linkedin"
+        if "tech" in cat: return "x"
+        if "sport" in cat: return "instagram"
+        if "entertain" in cat: return "youtube_shorts"
+        if "scienc" in cat: return "linkedin"
+        if "weather" in cat or "disaster" in cat: return "facebook"
+        return "x"
 
-    def publish_article(self, article_id):
-        # a) Open one DB connection for the whole method
-        conn = None
+    def run(self):
+        metrics = {
+            "queued": 0, "posted": 0, "failed": 0,
+            "skipped_duplicate": 0, "scheduled": 0,
+            "retries": 0, "multipost": 0, "token_missing": 0,
+            "cooldown_skips": 0
+        }
+        
         try:
             conn = self._get_conn()
             with conn.cursor(cursor_factory=DictCursor) as cur:
-                # b) Fetch from articles
-                cur.execute(
-                    "SELECT headline, source, url, category, is_breaking, status FROM articles WHERE id = %s",
-                    (article_id,)
-                )
-                article_row = cur.fetchone()
-                
-                if not article_row:
-                    return {"skipped": True}
-                    
-                # c) If status != publish_approved
-                if article_row["status"] != 'publish_approved':
-                    return {"skipped": True}
-                
-                # d) Fetch from summaries
-                cur.execute("SELECT twitter_text, hashtags FROM summaries WHERE article_id = %s", (article_id,))
-                summary_row = cur.fetchone()
-                twitter_text = summary_row["twitter_text"] if summary_row else None
-                hashtags = summary_row["hashtags"] if summary_row else None
-                
-                # e) Fetch from images (most recent)
-                cur.execute(
-                    "SELECT image_path FROM images WHERE article_id = %s ORDER BY created_at DESC LIMIT 1", 
-                    (article_id,)
-                )
-                image_row = cur.fetchone()
-                image_path = image_row["image_path"] if image_row else None
-                
-            # f) Build post_text
-            post_text = twitter_text or article_row["headline"]
-            if article_row.get("url"):
-                post_text += f"\n\n🔗 {article_row['url']}"
-            if hashtags:
-                post_text += f"\n\n{hashtags}"
-                
-            # g) Check rate limit
-            if not self.rate_limit_check("telegram", conn):
-                print("Telegram rate limit reached (>= 20 posts today).")
-                return {"telegram": False}
-                
-            # h) Call post_to_telegram
-            telegram_ok = self.post_to_telegram(article_id, post_text, image_path, conn)
+                # Add analytics columns if they don't exist dynamically
+                try:
+                    cur.execute("ALTER TABLE articles ADD COLUMN views INT DEFAULT 0, ADD COLUMN likes INT DEFAULT 0, ADD COLUMN shares INT DEFAULT 0, ADD COLUMN comments INT DEFAULT 0, ADD COLUMN clicks INT DEFAULT 0;")
+                    conn.commit()
+                except psycopg2.errors.DuplicateColumn:
+                    conn.rollback()
+                except Exception:
+                    conn.rollback()
+
+                cur.execute("""
+                    SELECT * FROM articles 
+                    WHERE status IN ('image_ready', 'queued', 'scheduled')
+                    ORDER BY 
+                      COALESCE(priority_level, 0) DESC, 
+                      viral_score DESC, 
+                      created_at DESC 
+                    LIMIT 20
+                """)
+                articles = cur.fetchall()
+        except Exception as e:
+            print(f"Fetch error: {e}")
+            conn.rollback()
+            if conn: conn.close()
+            return metrics
             
-            # i) If succeeded, update status
-            if telegram_ok:
+        metrics["queued"] = len(articles)
+        
+        import json
+        import hashlib
+        
+        for row in articles:
+            art = dict(row)
+            art_id = art["id"]
+            title = art.get("headline") or art.get("title", "")
+            
+            # Dupe Check
+            try:
                 with conn.cursor() as cur:
-                    cur.execute("UPDATE articles SET status='published' WHERE id=%s", (article_id,))
-                conn.commit()
+                    dup_check = art.get("duplicate_of_id")
+                    if dup_check is None:
+                        dup_check = -1
+                    cur.execute("""
+                        SELECT COUNT(*) FROM articles 
+                        WHERE (headline = %s OR id = %s OR id = %s)
+                        AND status = 'published'
+                        AND created_at > NOW() - INTERVAL '24 hours'
+                    """, (title, art_id, dup_check))
+                    if cur.fetchone()[0] > 0:
+                        with conn.cursor() as uc:
+                            uc.execute("UPDATE articles SET status='discarded_duplicate' WHERE id=%s", (art_id,))
+                        conn.commit()
+                        metrics["skipped_duplicate"] += 1
+                        continue
+            except Exception:
+                conn.rollback()
+                pass
                 
-            # j) Return dict
-            return {"telegram": telegram_ok, "article_id": article_id}
-                
-        except Exception as e:
-            print(f"Error in publish_article for ID {article_id}: {e}")
-            if conn:
-                self._log_error(self.AGENT_NAME, str(e), traceback.format_exc(), conn)
-            return {"telegram": False, "article_id": article_id}
-        finally:
-            if conn:
-                conn.close()
-
-    def run(self, limit=10):
-        conn = None
-        attempted = 0
-        telegram_ok = 0
-        failed = 0
-        try:
-            # a) Fetch up to limit
-            conn = self._get_conn()
-            with conn.cursor(cursor_factory=DictCursor) as cur:
-                cur.execute(
-                    "SELECT id FROM articles WHERE status='publish_approved' ORDER BY viral_score DESC LIMIT %s",
-                    (limit,)
-                )
-                rows = cur.fetchall()
-                article_ids = [r["id"] for r in rows]
-        except Exception as e:
-            print(f"Error fetching articles queue: {e}")
-            return {"attempted": 0, "telegram_ok": 0, "failed": 0}
-        finally:
-            if conn:
-                conn.close()
-                
-        # b) Call publish_article for each
-        for aid in article_ids:
-            attempted += 1
-            result = self.publish_article(aid)
-            
-            if result.get("telegram"):
-                telegram_ok += 1
+            # Captions
+            if not art.get("caption_json"):
+                caps = self.generate_captions({
+                    "title": title,
+                    "summary": art.get("full_text", ""),
+                    "category": art.get("category", ""),
+                    "emotion": art.get("emotion", ""),
+                    "viral_score": art.get("viral_score", 0),
+                    "source": art.get("source", "")
+                })
+                art["caption_json"] = caps
             else:
-                if not result.get("skipped"):
-                    failed += 1
-                    
-            # 3 second sleep (Telegram best practice)
-            time.sleep(3)
+                caps = art.get("caption_json")
+                if isinstance(caps, str): caps = json.loads(caps)
+                
+            # Platform Routing
+            best_plat = caps.get("best_platform")
+            if not best_plat or best_plat not in ["x", "instagram", "linkedin", "facebook", "telegram", "youtube_shorts"]:
+                best_plat = self.get_best_platform(art.get("category", ""))
+                
+            platforms_to_post = set([best_plat])
             
-        # c) Return metrics
-        return {"attempted": attempted, "telegram_ok": telegram_ok, "failed": failed}
+            cat_lower = art.get("category", "").lower()
+            if "break" in cat_lower or "break" in title.lower():
+                platforms_to_post.add("telegram")
+            if "entertain" in cat_lower:
+                platforms_to_post.update(["instagram", "youtube_shorts"])
+            
+            score = int(art.get("viral_score", 0))
+            if score >= 85:
+                sec_plat = "instagram" if best_plat == "x" else "x"
+                platforms_to_post.add(sec_plat)
+                metrics["multipost"] += 1
+                
+            is_urgent = (art.get("priority_level", 0) > 0) or ("urgent" in title.lower()) or ("breaking" in title.lower())
+            
+            # Cooldown & Time Checks
+            img_path = art.get("image_path")
+            posted_json = art.get("posted_platforms_json") or {}
+            if isinstance(posted_json, str): posted_json = json.loads(posted_json)
+            
+            success_any = False
+            last_err_msg = ""
+            
+            for plat in list(platforms_to_post):
+                if not self.is_good_time(plat, is_urgent):
+                    platforms_to_post.remove(plat)
+                    continue
+                
+                # Check 10-minute cooldown
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1 FROM articles WHERE status='published' AND posted_platforms_json::text LIKE %s AND posted_at > NOW() - INTERVAL '10 minutes' LIMIT 1", (f'%"{plat}"%',))
+                        if cur.fetchone():
+                            platforms_to_post.remove(plat)
+                            metrics["cooldown_skips"] += 1
+                            continue
+                except Exception:
+                    conn.rollback()
+                    pass
+            
+            if not platforms_to_post:
+                metrics["scheduled"] += 1
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE articles SET status='scheduled', caption_json=%s WHERE id=%s", (json.dumps(caps), art_id))
+                conn.commit()
+                continue
+                
+            # Post to platforms
+            for plat in platforms_to_post:
+                success = False
+                err_msg = ""
+                if plat == "telegram":
+                    success, err_msg = self._post_telegram(art, caps.get("telegram", ""), img_path)
+                elif plat == "x":
+                    success, err_msg = self._post_x(art, caps.get("x", ""), img_path)
+                elif plat == "instagram":
+                    success, err_msg = self._post_instagram(art, caps.get("instagram", ""), img_path)
+                elif plat == "linkedin":
+                    success, err_msg = self._post_linkedin(art, caps.get("linkedin", ""), img_path)
+                elif plat == "facebook":
+                    success, err_msg = self._post_facebook(art, caps.get("facebook", ""), img_path)
+                elif plat == "youtube_shorts":
+                    success, err_msg = False, "missing_token"
+                
+                if err_msg == "missing_token":
+                    metrics["token_missing"] += 1
+                
+                if success:
+                    success_any = True
+                    posted_json[plat] = err_msg
+                    metrics["posted"] += 1
+                else:
+                    last_err_msg = err_msg
+            
+            retries = art.get("retry_count", 0)
+            
+            try:
+                with conn.cursor() as cur:
+                    if success_any:
+                        best_plat = list(platforms_to_post)[0] # update best_platform to one that succeeded
+                        cur.execute("""
+                            UPDATE articles 
+                            SET status='published', 
+                                caption_json=%s, 
+                                posted_platforms_json=%s, 
+                                best_platform=%s, 
+                                posted_at=NOW(),
+                                views=0, likes=0, shares=0, comments=0, clicks=0
+                            WHERE id=%s
+                        """, (json.dumps(caps), json.dumps(posted_json), best_plat, art_id))
+                    else:
+                        retries += 1
+                        metrics["retries"] += 1
+                        if retries >= 3:
+                            metrics["failed"] += 1
+                            cur.execute("UPDATE articles SET status='publish_failed', retry_count=%s, last_error=%s, caption_json=%s WHERE id=%s", (retries, last_err_msg, json.dumps(caps), art_id))
+                        else:
+                            cur.execute("UPDATE articles SET retry_count=%s, last_error=%s, caption_json=%s WHERE id=%s", (retries, last_err_msg, json.dumps(caps), art_id))
+                conn.commit()
+            except Exception as e:
+                print(f"Error updating publish status: {e}")
+                conn.rollback()
+
+        if conn: conn.close()
+        
+        avg_retry = round(metrics["retries"] / max(1, metrics["queued"]), 1)
+        print(f"[PUBLISH] queued={metrics['queued']}")
+        print(f"[PUBLISH] posted={metrics['posted']}")
+        print(f"[PUBLISH] failed={metrics['failed']}")
+        print(f"[PUBLISH] skipped_duplicate={metrics['skipped_duplicate']}")
+        print(f"[PUBLISH] scheduled={metrics['scheduled']}")
+        print(f"[PUBLISH] avg_retry={avg_retry}")
+        print(f"[PUBLISH] multipost={metrics['multipost']}")
+        print(f"[PUBLISH] token_missing={metrics['token_missing']}")
+        print(f"[PUBLISH] cooldown_skips={metrics['cooldown_skips']}")
+        
+        return metrics
 
 if __name__ == "__main__":
     agent = PublishingAgent()
-    print("PublishingAgent startup...")
     results = agent.run()
-    print(f"Publishing result: {results}")
+

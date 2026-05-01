@@ -16,6 +16,11 @@ app.conf.beat_schedule = {
         "task": "celery_app.run_pipeline",
         "schedule": crontab(minute="*/15"),
     },
+    # Run ONLY discovery every 15 minutes (independent of slow summarisation)
+    "discover-only-15-mins": {
+        "task": "celery_app.discover_only",
+        "schedule": crontab(minute="*/15"),
+    },
     # Daily cleanup of old low-value articles at 3am UTC
     "cleanup-old-articles-daily": {
         "task": "celery_app.cleanup_old_articles",
@@ -41,6 +46,22 @@ def run_pipeline():
         return result
     except Exception as e:
         print(f"Pipeline Execution Failed: {e}")
+        raise
+
+
+@app.task
+def discover_only():
+    """Run only the NewsDiscoveryAgent — fast, independent of Ollama."""
+    try:
+        from agents.news_discovery_agent import NewsDiscoveryAgent
+        from dotenv import load_dotenv
+        load_dotenv()
+        agent = NewsDiscoveryAgent()
+        count = agent.run()
+        print(f"discover_only: {count} new articles")
+        return {"discovered": count}
+    except Exception as e:
+        print(f"discover_only failed: {e}")
         raise
 
 

@@ -53,6 +53,9 @@ engine = create_engine(
 # Global error handler to catch ALL exceptions and return 500 JSON
 @app.errorhandler(Exception)
 def handle_exception(e):
+    print(f"ERROR: {e}")
+    import traceback
+    traceback.print_exc()
     return jsonify({
         "error": "Internal Server Error",
         "message": str(e)
@@ -188,6 +191,24 @@ def get_article_image(article_id):
 
         return jsonify({"error": "Image file missing from disk", "path": image_path}), 404
 
+@app.route('/api/articles/<int:article_id>/portrait', methods=['GET'])
+def get_portrait_image(article_id):
+    query = """
+        SELECT image_path FROM images
+        WHERE article_id = :article_id
+          AND image_type = 'portrait'
+        ORDER BY created_at DESC LIMIT 1
+    """
+    with engine.connect() as conn:
+        result = conn.execute(text(query), {"article_id": article_id}).fetchone()
+        if not result or not result[0]:
+            return jsonify({"error": "No portrait image"}), 404
+        image_path = result[0]
+        if not os.path.exists(image_path):
+            return jsonify({"error": "Portrait file missing"}), 404
+        return send_file(image_path, mimetype='image/png')
+
+
 @app.route('/api/articles/<int:article_id>/thumbnail', methods=['GET'])
 def get_article_thumbnail(article_id):
     query = """
@@ -299,7 +320,10 @@ def get_health():
     # Check Ollama
     try:
         # Pinging the root endpoint of Ollama API server
-        resp = requests.get("http://localhost:11434/", timeout=3)
+        ollama_host = os.getenv("OLLAMA_HOST", "localhost:11434")
+        if "://" not in ollama_host:
+            ollama_host = f"http://{ollama_host}"
+        resp = requests.get(ollama_host, timeout=3)
         if resp.status_code == 200:
             health["ollama"] = "ok"
     except Exception:
@@ -360,16 +384,29 @@ def get_pending_posts():
         query = """
             SELECT 
                 a.id, a.headline, a.source, a.category, a.viral_score, a.is_breaking,
-                s.twitter_text, s.linkedin_text, s.instagram_caption, s.facebook_text, s.hashtags
+                s.twitter_text, s.linkedin_text, s.instagram_caption,
+                s.facebook_text, s.hashtags,
+                (SELECT image_path FROM images i 
+                 WHERE i.article_id = a.id 
+                 ORDER BY i.created_at DESC LIMIT 1) as image_path
             FROM articles a
             JOIN summaries s ON a.id = s.article_id
-            WHERE a.status = 'summarised'
+            WHERE a.status = 'approved'
+            AND EXISTS (
+                SELECT 1 FROM images i WHERE i.article_id = a.id
+            )
             ORDER BY a.viral_score DESC
             LIMIT 50
         """
         with engine.connect() as conn:
             result = conn.execute(text(query))
             articles = [dict(row) for row in result.mappings()]
+            
+            for article in articles:
+                if article.get('image_path'):
+                    article['image_url'] = f"/api/articles/{article['id']}/image"
+                else:
+                    article['image_url'] = None
             
         return jsonify(articles), 200
     except Exception as e:
@@ -407,10 +444,57 @@ def approve_post(article_id):
                 result = conn.execute(text(query), {"id": article_id})
                 if result.rowcount == 0:
                     return jsonify({"error": "Article not found"}), 404
-                    
+
+        def _publish_in_background(aid):
+            try:
+                import sys, os
+                sys.path.insert(0, os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), '..')
+                ))
+                from agents.publishing_agent import PublishingAgent
+                result = PublishingAgent().publish_article(aid)
+                print(f"[BG Publisher] article {aid}: {result}")
+            except Exception as e:
+                print(f"[BG Publisher] error for article {aid}: {e}")
+
+        threading.Thread(
+            target=_publish_in_background,
+            args=(article_id,),
+            daemon=True
+        ).start()
+
         return jsonify({"status": "approved", "article_id": article_id}), 200
     except Exception as e:
         return jsonify({"error": "Database error approving article", "details": str(e)}), 500
+
+
+@app.route('/api/pipeline/publish-now', methods=['POST'])
+def publish_now():
+    def _run():
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.abspath(
+                os.path.join(os.path.dirname(__file__), '..')
+            ))
+            from agents.publishing_agent import PublishingAgent
+            result = PublishingAgent().run(limit=20)
+            print(f"[Manual Publish] {result}")
+        except Exception as e:
+            print(f"[Manual Publish] error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "publishing", "message": "Publishing all pending articles in background"}), 200
+
+
+@app.route('/api/posts/queue', methods=['DELETE'])
+def clear_queue():
+    try:
+        query = "UPDATE articles SET status = 'rejected' WHERE status = 'publish_approved'"
+        with engine.connect() as conn:
+            with conn.begin():
+                result = conn.execute(text(query))
+        return jsonify({"status": "cleared", "count": result.rowcount}), 200
+    except Exception as e:
+        return jsonify({"error": "Failed to clear queue", "details": str(e)}), 500
 
 
 @app.route('/api/posts/<int:article_id>/reject', methods=['POST'])

@@ -31,10 +31,12 @@ class IntelligencePipeline:
     def _update_article_score(self, cur, article_id: int, viral_score: int, is_breaking: bool):
         # Promote to 'publish_approved' if it's breaking news OR has a high viral score (>= 65)
         # Articles scoring below 65 are automatically discarded to keep the queue clean
-        if is_breaking or viral_score >= 65:
-            new_status = 'publish_approved'
+        if is_breaking:
+            new_status = 'approved'
+        elif viral_score >= 65:
+            new_status = 'approved'
         else:
-            new_status = 'discarded'
+            new_status = 'new'
         
         cur.execute(
             """

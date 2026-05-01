@@ -10,7 +10,7 @@ class SummarisationAgent:
     """Agent that reads approved articles and uses Ollama local inference to generate social media summaries."""
     
     AGENT_NAME = "summarisation"
-    OLLAMA_URL = "http://localhost:11434/api/generate"
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
     OLLAMA_MODEL = "mistral"
 
     def __init__(self):
@@ -147,6 +147,12 @@ class SummarisationAgent:
                 
                 # Use a fresh cursor per transaction
                 with conn.cursor() as cur:
+                    # Guard: article may have been purged while Ollama was running
+                    cur.execute("SELECT 1 FROM articles WHERE id = %s", (article_id,))
+                    if not cur.fetchone():
+                        print(f"  [skipped] Article {article_id} was purged before summary could be saved.")
+                        continue
+
                     # 5) Save outputs to summaries table
                     cur.execute(
                         """

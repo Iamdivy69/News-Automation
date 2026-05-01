@@ -1,85 +1,59 @@
-import os
-import sys
-import time
 import subprocess
-import requests
+import time
 import webbrowser
+import os
 
-def check_ollama():
-    """Returns True if the Ollama API is responding on localhost:11434."""
-    try:
-        response = requests.get("http://localhost:11434/", timeout=3)
-        return response.status_code == 200
-    except requests.exceptions.RequestException:
-        return False
-
-def open_in_new_window(cmd_list):
-    """
-    Spawns a new Windows command prompt to run the given list.
-    We prepend 'cmd /K' so the window stays open to show logs if it crashes,
-    otherwise CREATE_NEW_CONSOLE alone will immediately close on exit.
-    """
-    full_cmd = ["cmd", "/K"] + cmd_list
-    print(f"    -> Spawning new console for: {' '.join(cmd_list)}")
-    # CREATE_NEW_CONSOLE creates a visible new command line window (Windows only feature)
-    subprocess.Popen(full_cmd, creationflags=subprocess.CREATE_NEW_CONSOLE)
+def open_window(title, command):
+    subprocess.Popen([
+        'cmd', '/K',
+        f'title {title} && {command}'
+    ], creationflags=subprocess.CREATE_NEW_CONSOLE)
 
 def main():
-    if os.name != "nt":
-        print("This script is designed for Windows only.")
-        sys.exit(1)
-
-    print("========================================")
-    print("      Autonomous News Services          ")
-    print("========================================\n")
-
-    # Step 1: Check and Start Ollama
-    print("[1] Checking Ollama service at http://localhost:11434 ...")
-    if not check_ollama():
-        print("    -> Ollama is NOT running. Attempting to start...")
-        open_in_new_window(["ollama", "serve"])
-        # Give Ollama a moment to bind its port before continuing
-        time.sleep(3)
-        if check_ollama():
-            print("    -> Ollama successfully started.")
-        else:
-            print("    -> [WARNING] Attempted to start Ollama, but it is still not responding. Ensure 'ollama' is installed and in your PATH.")
-    else:
-        print("    -> Ollama is already running.")
-
-    print("\n[2] Starting Flask REST API (api/api.py) on Port 5000...")
-    open_in_new_window(["python", "api/api.py"])
-
-    # Step 3: Wait 2 seconds
-    print("\n[3] Waiting 2 seconds for Flask API to initialize...")
-    time.sleep(2)
-
-    # Step 4: Start Streamlit Dashboard
-    print("\n[4] Starting Streamlit Dashboard (dashboard/dashboard.py) on Port 8501...")
-    open_in_new_window(["streamlit", "run", "dashboard/dashboard.py", "--server.headless", "true"])
-
-    # Wait for streamlit to bind port
-    print("\n[5] Waiting 3 seconds for Streamlit to build the frontend...")
+    print(f"\n[1/7] Starting Docker containers...")
+    result = subprocess.run(
+        ['docker', 'start', 'news_system_postgres', 'news_system_redis'],
+        capture_output=True, text=True
+    )
+    print(f"Docker: {result.stdout.strip() or result.stderr.strip()}")
     time.sleep(3)
 
-    # Step 5: Start React Dashboard (news-weaver)
-    print("\n[5] Starting React Dashboard (news-weaver)...")
-    react_dir = os.path.join(os.path.dirname(__file__), "..", "news-weaver", "news-weaver-main")
-    subprocess.Popen(
-        ["cmd", "/K", f"cd /d {os.path.abspath(react_dir)} && npm run dev"],
-        creationflags=subprocess.CREATE_NEW_CONSOLE
-    )
+    print(f"[2/7] Starting Ollama...")
+    open_window("Ollama", "ollama serve")
     time.sleep(4)
 
-    # Step 6: Open Browser
-    react_url = "http://localhost:5173"
-    print(f"\n    -> Opening {react_url} in your default browser...")
-    webbrowser.open(react_url)
-    
-    print("\n========================================")
-    print(" All background services have been launched! ")
-    print(" You can close this orchestrator window safely.")
-    print("========================================")
+    print(f"[3/7] Starting Flask API...")
+    open_window("Flask API - Port 5000", "cd /d D:\\PROJECTS\\NA && python api/api.py")
+    time.sleep(3)
+
+    print(f"[4/7] Starting Celery Worker...")
+    open_window("Celery Worker", "cd /d D:\\PROJECTS\\NA && celery -A celery_app worker --loglevel=info -P solo")
+    time.sleep(2)
+
+    print(f"[5/7] Starting Celery Beat...")
+    open_window("Celery Beat", "cd /d D:\\PROJECTS\\NA && celery -A celery_app beat --loglevel=info")
+    time.sleep(2)
+
+    print(f"[6/7] Starting React Frontend...")
+    open_window("React Frontend - Port 5173", "cd /d D:\\PROJECTS\\NA\\news-weaver\\news-weaver-main && npm run dev")
+    time.sleep(5)
+
+    print(f"[7/7] Opening browser tabs...")
+    webbrowser.open("http://localhost:5173")
+    time.sleep(1)
+    webbrowser.open("http://localhost:5000/api/health")
+
+    print("\n" + "="*50)
+    print("ALL SERVICES STARTED")
+    print("="*50)
+    print("React Dashboard : http://localhost:5173")
+    print("Flask API       : http://localhost:5000")
+    print("Flask Health    : http://localhost:5000/api/health")
+    print("Streamlit       : http://localhost:8501 (if running)")
+    print("="*50)
+    print("\nClose this window or press Ctrl+C to stop monitoring.")
+
+    input("\nPress Enter to exit...")
 
 if __name__ == "__main__":
     main()
