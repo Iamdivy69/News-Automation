@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { X, Copy, Check } from "lucide-react";
 import { fetchArticle } from "@/lib/api";
@@ -32,7 +32,15 @@ export default function ArticleModal({ article, onClose }: ArticleModalProps) {
     facebook:  raw.facebook_text       ?? "",
   };
   const hashtags: string = raw.hashtags ?? "";
-  const imageUrl = `/api/articles/${article.id}/image`;
+  const [imageUrl, setImageUrl] = useState(`/api/articles/${article.id}/portrait`);
+
+  useEffect(() => {
+    fetch(`/api/articles/${article.id}/portrait`, { method: 'HEAD' })
+      .then(r => {
+        if (!r.ok) setImageUrl(`/api/articles/${article.id}/image`);
+      })
+      .catch(() => setImageUrl(`/api/articles/${article.id}/image`));
+  }, [article.id]);
 
   const handleCopy = () => {
     const text = summaries[activeTab] ?? "";

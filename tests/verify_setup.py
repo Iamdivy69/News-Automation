@@ -68,7 +68,7 @@ def check_setup():
         import psycopg2
         try:
             # Attempting connection with local defaults
-            conn = psycopg2.connect(dbname="news_system", user="postgres", host="localhost", connect_timeout=3)
+            conn = psycopg2.connect(dbname="news_system", user="postgres", password="postgres", host="localhost", port=5434, connect_timeout=3)
             conn.close()
             print_result("PostgreSQL (news_system DB)", True)
         except Exception as e:
@@ -79,10 +79,10 @@ def check_setup():
 
     # 5. Redis Check
     try:
-        with socket.create_connection(("localhost", 6379), timeout=2) as s:
-            print_result("Redis @ localhost:6379", True)
+        with socket.create_connection(("localhost", 16380), timeout=2) as s:
+            print_result("Redis @ localhost:16380", True)
     except:
-        print_result("Redis @ localhost:6379", False, "docker run -d -p 6379:6379 redis (or start redis-server)")
+        print_result("Redis @ localhost:16380", False, "docker run -d -p 16380:6379 redis (or start redis-server)")
 
 if __name__ == "__main__":
     # Enable ANSI escape characters on Windows

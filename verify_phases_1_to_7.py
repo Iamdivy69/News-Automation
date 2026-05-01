@@ -130,7 +130,7 @@ except Exception as e:
 # 1-E Redis
 try:
     import redis
-    r_client = redis.Redis(host="localhost", port=6379)
+    r_client = redis.Redis(host="localhost", port=16380)
     r_client.ping()
     ok("Redis ping successful")
     record(True)

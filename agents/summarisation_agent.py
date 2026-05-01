@@ -3,14 +3,16 @@ import requests
 import psycopg2
 import psycopg2.extras
 import traceback
+import json
 from time import sleep
+import google.genai as genai
 from config.branding_layer import BrandingLayer
 
 class SummarisationAgent:
-    """Agent that reads approved articles and uses Ollama local inference to generate social media summaries."""
+    """Agent that reads top30_selected articles and generates social media summaries."""
     
     AGENT_NAME = "summarisation"
-    OLLAMA_URL = "http://localhost:11434/api/generate"
+    OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
     OLLAMA_MODEL = "mistral"
 
     def __init__(self):
@@ -18,12 +20,13 @@ class SummarisationAgent:
         if not self.conn_string:
             raise ValueError("DATABASE_URL environment variable is not set.")
         self.branding = BrandingLayer()
+        self._gemini_key = os.environ.get("GEMINI_API_KEY")
+        self._client = genai.Client(api_key=self._gemini_key) if self._gemini_key else None
 
     def _get_conn(self):
         return psycopg2.connect(self.conn_string)
 
     def _determine_tone(self, category: str, is_breaking: bool) -> str:
-        """Determines the requested tone based on the category or breaking status."""
         if is_breaking:
             return "urgent"
         
@@ -37,7 +40,6 @@ class SummarisationAgent:
         return mapping.get(cat, "neutral")
 
     def _quality_gate(self, text: str) -> bool:
-        """Returns True if the output meets minimum quality criteria, otherwise False."""
         if not text or len(text) < 40:
             return False
         
@@ -47,8 +49,7 @@ class SummarisationAgent:
             
         return True
 
-    def _generate(self, prompt: str, system: str) -> str | None:
-        """Pings Ollama with 1 retry logic and a strict quality gate."""
+    def _generate(self, prompt: str, system: str) -> tuple[str | None, str]:
         payload = {
             "model": self.OLLAMA_MODEL,
             "prompt": prompt,
@@ -56,98 +57,128 @@ class SummarisationAgent:
             "stream": False
         }
         
-        for attempt in range(2):  # 1 initial + 1 retry
+        for attempt in range(3):
             try:
                 resp = requests.post(self.OLLAMA_URL, json=payload, timeout=120)
                 if resp.status_code == 200:
                     text = resp.json().get("response", "").strip()
-                    # Strip any generic surrounding quotes sometimes thrown by Mistral
                     text = text.strip('"').strip("'")
                     
                     if self._quality_gate(text):
-                        return text
+                        return text, "ollama"
             except Exception as e:
                 print(f"Ollama generation error: {e}")
             
-            # Wait briefly before retrying
-            if attempt == 0:
-                sleep(2)
+            backoff = 2 ** (attempt + 1) # 2s, 4s, 8s
+            sleep(backoff)
+            
+        if self._gemini_key and self._client:
+            try:
+                gemini_prompt = f"System Instruction: {system}\n\nTask: {prompt}"
+                response = self._client.models.generate_content(
+                    model='gemini-1.5-flash',
+                    contents=gemini_prompt,
+                )
+                text = response.text.strip().strip('"').strip("'")
+                if self._quality_gate(text):
+                    return text, "gemini"
+            except Exception as e:
+                print(f"Gemini fallback error: {e}")
                 
-        return None
+        return None, "failed"
 
-    def _generate_summaries(self, headline: str, full_text: str, tone: str) -> tuple:
-        """Generates all 5 required texts serially."""
-        # Truncate full text to ensure we don't blow out the context window
+    def _generate_summaries(self, headline: str, full_text: str, tone: str) -> dict:
         safe_text = (full_text or "")[:4000]
         base_text = f"Headline: {headline}\n\nArticle: {safe_text}"
         
-        # Twitter
+        sys_summary = "You are a news editor. Write a plain summary of the article in under 100 words. Do NOT wrap output in quotes."
         sys_twitter = f"You are a social media manager. Tone: {tone}. Write a Twitter post about the provided article. Max 240 chars. Must have a strong hook in the first 6 words. Do NOT wrap output in quotes."
-        twitter = self._generate(base_text, sys_twitter)
-        
-        # LinkedIn
         sys_linkedin = f"You are a professional networker. Tone: {tone}. Write a LinkedIn post about the provided article. Max 500 chars. Must start with a professional insight opening. Do NOT wrap output in quotes."
-        linkedin = self._generate(base_text, sys_linkedin)
-        
-        # Instagram 
         sys_ig = f"You are an Instagram influencer. Tone: {tone}. Write an Instagram caption about the provided article. Max 150 chars. Make it highly visual and emotional. Do NOT wrap output in quotes."
-        ig = self._generate(base_text, sys_ig)
-        
-        # Facebook
         sys_fb = f"You are a community manager. Tone: {tone}. Write a Facebook post about the provided article. Output EXACTLY 3 bullet points, each starting with an emoji. Conversational style. Do NOT wrap output in quotes."
-        fb = self._generate(base_text, sys_fb)
-        
-        # Hashtags
         sys_tags = "You are an SEO expert. Read the article and return EXACTLY 8 relevant hashtags separated by commas (e.g., #News,#Tech,...). Mix broad and niche tags. Do NOT output anything else."
-        tags = self._generate(base_text, sys_tags)
         
-        return twitter, linkedin, ig, fb, tags
+        res = {}
+        res["summary"], res["summary_src"] = self._generate(base_text, sys_summary)
+        res["twitter"], res["twitter_src"] = self._generate(base_text, sys_twitter)
+        res["linkedin"], res["linkedin_src"] = self._generate(base_text, sys_linkedin)
+        res["ig"], res["ig_src"] = self._generate(base_text, sys_ig)
+        res["fb"], res["fb_src"] = self._generate(base_text, sys_fb)
+        res["tags"], res["tags_src"] = self._generate(base_text, sys_tags)
+        
+        return res
 
-    def run(self) -> int:
-        """Main execution flow: Process approved articles in PostgreSQL."""
+    def run(self) -> dict:
         conn = self._get_conn()
-        processed_count = 0
+        metrics = {"processed": 0, "ollama_success": 0, "gemini_fallback": 0, "skipped": 0}
         
-        # 1) Query PostgreSQL for articles with status='approved'
         articles = []
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(
                     "SELECT id, headline, full_text, category, is_breaking "
-                    "FROM articles WHERE status = 'approved' "
-                    "ORDER BY viral_score DESC LIMIT 50"
+                    "FROM articles WHERE top_30_selected = TRUE AND status = 'top30_selected' "
+                    "ORDER BY viral_score DESC LIMIT 30"
                 )
                 articles = cur.fetchall()
         except Exception as e:
             print(f"Error fetching articles: {e}")
             conn.close()
-            return 0
+            return metrics
                 
         for article in articles:
             article_id = article["id"]
             try:
                 headline = article["headline"] or ""
-                full_text = article["full_text"] or ""
+                full_text = article["full_text"]
+                
+                if not headline or len(headline) < 10:
+                    metrics["skipped"] += 1
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO error_logs (agent, message) VALUES (%s, %s)",
+                            (self.AGENT_NAME, f"Article {article_id} Skipped: Headline empty or < 10 chars")
+                        )
+                    conn.commit()
+                    continue
+                    
+                if not full_text or len(full_text) < 50:
+                    full_text = headline
+                
                 category = article["category"] or ""
                 is_breaking = article["is_breaking"] or False
                 
-                # 2) Determine tone
                 tone = self._determine_tone(category, is_breaking)
+                gens = self._generate_summaries(headline, full_text, tone)
                 
-                # 3) & 4) Make requests & quality gate
-                twitter, linkedin, ig, fb, tags = self._generate_summaries(headline, full_text, tone)
+                sources = [gens["summary_src"], gens["twitter_src"], gens["linkedin_src"], gens["ig_src"], gens["fb_src"], gens["tags_src"]]
+                if "gemini" in sources:
+                    metrics["gemini_fallback"] += 1
+                else:
+                    metrics["ollama_success"] += 1
                 
                 branded_summary = self.branding.brand_summary({
-                    "twitter_text": twitter, 
-                    "linkedin_text": linkedin, 
-                    "instagram_caption": ig, 
-                    "facebook_text": fb, 
-                    "hashtags": tags
+                    "twitter_text": gens["twitter"], 
+                    "linkedin_text": gens["linkedin"], 
+                    "instagram_caption": gens["ig"], 
+                    "facebook_text": gens["fb"], 
+                    "hashtags": gens["tags"]
                 })
                 
-                # Use a fresh cursor per transaction
+                captions = {
+                    "twitter": branded_summary["twitter_text"],
+                    "linkedin": branded_summary["linkedin_text"],
+                    "instagram": branded_summary["instagram_caption"],
+                    "facebook": branded_summary["facebook_text"],
+                    "hashtags": branded_summary["hashtags"]
+                }
+                
                 with conn.cursor() as cur:
-                    # 5) Save outputs to summaries table
+                    cur.execute("SELECT 1 FROM articles WHERE id = %s", (article_id,))
+                    if not cur.fetchone():
+                        print(f"  [skipped] Article {article_id} was purged before summary could be saved.")
+                        continue
+
                     cur.execute(
                         """
                         INSERT INTO summaries (article_id, twitter_text, linkedin_text, instagram_caption, facebook_text, hashtags, tone, is_branded)
@@ -172,18 +203,27 @@ class SummarisationAgent:
                         )
                     )
                     
-                    # 6) Update article status
-                    cur.execute("UPDATE articles SET status = 'summarised' WHERE id = %s", (article_id,))
+                    cur.execute(
+                        """
+                        UPDATE articles SET 
+                            summary = %s,
+                            captions = %s,
+                            status = 'summarised',
+                            processing_stage = 'summarised',
+                            updated_at = NOW()
+                        WHERE id = %s
+                        """,
+                        (gens["summary"], json.dumps(captions), article_id)
+                    )
                 
                 conn.commit()
-                processed_count += 1
+                metrics["processed"] += 1
                 print(f"Successfully processed and summarised article ID {article_id}.")
                 
             except Exception as e:
                 conn.rollback()
                 print(f"Error processing article ID {article_id}: {e}")
                 try:
-                    # Log error back to the database
                     with conn.cursor() as cur:
                         cur.execute(
                             "INSERT INTO error_logs (agent, message, stack_trace) VALUES (%s, %s, %s)",
@@ -194,10 +234,8 @@ class SummarisationAgent:
                     print(f"Failed to log error to DB for article {article_id}: {log_err}")
         
         conn.close()
-        return processed_count
-            
-        # 7) Return count
-        return processed_count
+        print(f"[SUMM] processed={metrics['processed']} ollama_success={metrics['ollama_success']} gemini_fallback={metrics['gemini_fallback']} skipped={metrics['skipped']}")
+        return metrics
 
 if __name__ == "__main__":
     from dotenv import load_dotenv
@@ -205,5 +243,4 @@ if __name__ == "__main__":
     
     agent = SummarisationAgent()
     print("SummarisationAgent started...")
-    count = agent.run()
-    print(f"Finished. Total articles summarised: {count}")
+    agent.run()

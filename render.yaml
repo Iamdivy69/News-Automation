@@ -1,0 +1,50 @@
+services:
+  - type: web
+    name: flask-api
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn api.api:app --bind 0.0.0.0:$PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OLLAMA_URL
+        value: http://localhost:11434/api/generate
+      - key: OLLAMA_MODEL
+        value: mistral
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHANNEL_ID
+        sync: false
+      - key: TOP_N_ARTICLES
+        value: "30"
+
+  - type: worker
+    name: master-pipeline
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OLLAMA_URL
+        value: http://localhost:11434/api/generate
+      - key: OLLAMA_MODEL
+        value: mistral
+      - key: PEXELS_API_KEY
+        sync: false
+      - key: CLOUDINARY_URL
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHANNEL_ID
+        sync: false
+      - key: TOP_N_ARTICLES
+        value: "30"

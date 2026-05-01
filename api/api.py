@@ -53,6 +53,9 @@ engine = create_engine(
 # Global error handler to catch ALL exceptions and return 500 JSON
 @app.errorhandler(Exception)
 def handle_exception(e):
+    print(f"ERROR: {e}")
+    import traceback
+    traceback.print_exc()
     return jsonify({
         "error": "Internal Server Error",
         "message": str(e)
@@ -188,6 +191,24 @@ def get_article_image(article_id):
 
         return jsonify({"error": "Image file missing from disk", "path": image_path}), 404
 
+@app.route('/api/articles/<int:article_id>/portrait', methods=['GET'])
+def get_portrait_image(article_id):
+    query = """
+        SELECT image_path FROM images
+        WHERE article_id = :article_id
+          AND image_type = 'portrait'
+        ORDER BY created_at DESC LIMIT 1
+    """
+    with engine.connect() as conn:
+        result = conn.execute(text(query), {"article_id": article_id}).fetchone()
+        if not result or not result[0]:
+            return jsonify({"error": "No portrait image"}), 404
+        image_path = result[0]
+        if not os.path.exists(image_path):
+            return jsonify({"error": "Portrait file missing"}), 404
+        return send_file(image_path, mimetype='image/png')
+
+
 @app.route('/api/articles/<int:article_id>/thumbnail', methods=['GET'])
 def get_article_thumbnail(article_id):
     query = """
@@ -280,32 +301,68 @@ def get_images_stats():
 @app.route('/api/health', methods=['GET'])
 def get_health():
     """
-    Returns health status of PostgreSQL, Ollama, and current timestamp.
+    Returns health status of PostgreSQL, Ollama, Gemini, Pexels, Cloudinary and current timestamp.
     """
-    health = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "postgresql": "error",
-        "ollama": "error"
-    }
-    
-    # Check PostgreSQL
     try:
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        health["postgresql"] = "ok"
-    except Exception:
-        pass
+        health = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "postgresql": "error",
+            "ollama": "error",
+            "gemini": "error",
+            "pexels": "disabled",
+            "cloudinary": "disabled"
+        }
         
-    # Check Ollama
-    try:
-        # Pinging the root endpoint of Ollama API server
-        resp = requests.get("http://localhost:11434/", timeout=3)
-        if resp.status_code == 200:
-            health["ollama"] = "ok"
-    except Exception:
-        pass
-        
-    return jsonify(health)
+        # Check PostgreSQL
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            health["postgresql"] = "ok"
+        except Exception:
+            pass
+            
+        # Check Ollama
+        try:
+            ollama_host = os.getenv("OLLAMA_HOST", "localhost:11434")
+            if "://" not in ollama_host:
+                ollama_host = f"http://{ollama_host}"
+            resp = requests.get(ollama_host, timeout=3)
+            if resp.status_code == 200:
+                health["ollama"] = "ok"
+        except Exception:
+            pass
+            
+        # Check Gemini
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key:
+            try:
+                resp = requests.get(f"https://generativelanguage.googleapis.com/v1beta/models?key={gemini_key}", timeout=3)
+                if resp.status_code == 200:
+                    health["gemini"] = "ok"
+            except Exception:
+                pass
+                
+        # Check Pexels
+        pexels_key = os.getenv("PEXELS_API_KEY")
+        if pexels_key:
+            try:
+                resp = requests.get("https://api.pexels.com/v1/search?query=test&per_page=1", 
+                                  headers={"Authorization": pexels_key}, timeout=3)
+                if resp.status_code == 200:
+                    health["pexels"] = "ok"
+                else:
+                    health["pexels"] = "error"
+            except Exception:
+                health["pexels"] = "error"
+
+        # Check Cloudinary
+        cloudinary_url = os.getenv("CLOUDINARY_URL")
+        if cloudinary_url:
+            health["cloudinary"] = "ok"
+                
+        return jsonify(health)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/pipeline/run', methods=['POST'])
@@ -360,16 +417,29 @@ def get_pending_posts():
         query = """
             SELECT 
                 a.id, a.headline, a.source, a.category, a.viral_score, a.is_breaking,
-                s.twitter_text, s.linkedin_text, s.instagram_caption, s.facebook_text, s.hashtags
+                s.twitter_text, s.linkedin_text, s.instagram_caption,
+                s.facebook_text, s.hashtags,
+                (SELECT image_path FROM images i 
+                 WHERE i.article_id = a.id 
+                 ORDER BY i.created_at DESC LIMIT 1) as image_path
             FROM articles a
             JOIN summaries s ON a.id = s.article_id
-            WHERE a.status = 'summarised'
+            WHERE a.status = 'approved'
+            AND EXISTS (
+                SELECT 1 FROM images i WHERE i.article_id = a.id
+            )
             ORDER BY a.viral_score DESC
             LIMIT 50
         """
         with engine.connect() as conn:
             result = conn.execute(text(query))
             articles = [dict(row) for row in result.mappings()]
+            
+            for article in articles:
+                if article.get('image_path'):
+                    article['image_url'] = f"/api/articles/{article['id']}/image"
+                else:
+                    article['image_url'] = None
             
         return jsonify(articles), 200
     except Exception as e:
@@ -407,10 +477,57 @@ def approve_post(article_id):
                 result = conn.execute(text(query), {"id": article_id})
                 if result.rowcount == 0:
                     return jsonify({"error": "Article not found"}), 404
-                    
+
+        def _publish_in_background(aid):
+            try:
+                import sys, os
+                sys.path.insert(0, os.path.abspath(
+                    os.path.join(os.path.dirname(__file__), '..')
+                ))
+                from agents.publishing_agent import PublishingAgent
+                result = PublishingAgent().publish_article(aid)
+                print(f"[BG Publisher] article {aid}: {result}")
+            except Exception as e:
+                print(f"[BG Publisher] error for article {aid}: {e}")
+
+        threading.Thread(
+            target=_publish_in_background,
+            args=(article_id,),
+            daemon=True
+        ).start()
+
         return jsonify({"status": "approved", "article_id": article_id}), 200
     except Exception as e:
         return jsonify({"error": "Database error approving article", "details": str(e)}), 500
+
+
+@app.route('/api/pipeline/publish-now', methods=['POST'])
+def publish_now():
+    def _run():
+        try:
+            import sys, os
+            sys.path.insert(0, os.path.abspath(
+                os.path.join(os.path.dirname(__file__), '..')
+            ))
+            from agents.publishing_agent import PublishingAgent
+            result = PublishingAgent().run(limit=20)
+            print(f"[Manual Publish] {result}")
+        except Exception as e:
+            print(f"[Manual Publish] error: {e}")
+    threading.Thread(target=_run, daemon=True).start()
+    return jsonify({"status": "publishing", "message": "Publishing all pending articles in background"}), 200
+
+
+@app.route('/api/posts/queue', methods=['DELETE'])
+def clear_queue():
+    try:
+        query = "UPDATE articles SET status = 'rejected' WHERE status = 'publish_approved'"
+        with engine.connect() as conn:
+            with conn.begin():
+                result = conn.execute(text(query))
+        return jsonify({"status": "cleared", "count": result.rowcount}), 200
+    except Exception as e:
+        return jsonify({"error": "Failed to clear queue", "details": str(e)}), 500
 
 
 @app.route('/api/posts/<int:article_id>/reject', methods=['POST'])
@@ -542,6 +659,182 @@ def get_posts_tracker_stats():
         }), 200
     except Exception as e:
         return jsonify({"error": "Failed to fetch tracker stats", "details": str(e)}), 500
+
+@app.route('/api/pipeline/stages', methods=['GET'])
+def get_pipeline_stages():
+    try:
+        query = """
+            SELECT status, COUNT(*) as cnt FROM articles GROUP BY status
+        """
+        with engine.connect() as conn:
+            result = conn.execute(text(query)).mappings().fetchall()
+            
+        stages = {
+            "raw": 0, "approved": 0, "ranked": 0, "approved_unique": 0,
+            "top30_selected": 0, "discarded": 0, "summarised": 0,
+            "image_ready": 0, "published": 0, "failed": 0
+        }
+        for row in result:
+            s = row['status']
+            if s in stages:
+                stages[s] = row['cnt']
+        return jsonify(stages), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/articles/top30', methods=['GET'])
+def get_top30():
+    try:
+        query = """
+            SELECT id, headline, source, viral_score, status, category,
+                   captions, image_url, processing_stage
+            FROM articles
+            WHERE top_30_selected = TRUE
+            ORDER BY viral_score DESC
+        """
+        with engine.connect() as conn:
+            result = conn.execute(text(query)).mappings().fetchall()
+        return jsonify([dict(r) for r in result]), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/articles/<int:article_id>', methods=['PATCH'])
+def update_article(article_id):
+    try:
+        data = request.json
+        headline = data.get("headline")
+        captions = data.get("captions")
+        
+        updates = []
+        params = {"id": article_id}
+        if headline is not None:
+            updates.append("headline = :headline")
+            params["headline"] = headline
+        if captions is not None:
+            import json
+            updates.append("captions = :captions")
+            params["captions"] = json.dumps(captions)
+            
+        if not updates:
+            return jsonify({"error": "No valid fields provided"}), 400
+            
+        updates.append("processing_stage = 'manually_edited'")
+        
+        query = f"UPDATE articles SET {', '.join(updates)} WHERE id = :id"
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text(query), params)
+                
+        return jsonify({"status": "success", "article_id": article_id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/articles/<int:article_id>/regenerate-image', methods=['POST'])
+def regenerate_image(article_id):
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT * FROM articles WHERE id = :id"), {"id": article_id}).mappings().fetchone()
+            
+        if not row:
+            return jsonify({"error": "Article not found"}), 404
+            
+        art = dict(row)
+        
+        import sys, os
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+        from agents.headline_generator import HeadlineGenerator
+        from agents.image_renderer import ImageRenderer
+        
+        hg = HeadlineGenerator()
+        headline_data = hg.generate({
+            "title": art.get("headline", ""),
+            "summary": art.get("summary") or art.get("full_text", ""),
+            "category": art.get("category", ""),
+            "is_breaking": art.get("is_breaking", False)
+        })
+        
+        renderer = ImageRenderer()
+        output_dir = os.path.join(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')), 'images', datetime.now().strftime('%Y-%m-%d'))
+        os.makedirs(output_dir, exist_ok=True)
+        filename = f"visual_{article_id}_{int(datetime.now().timestamp())}.png"
+        local_path = os.path.join(output_dir, filename)
+        
+        render_data = headline_data.copy()
+        render_data.update(art)
+        
+        img_path = renderer.render(render_data, local_path)
+        
+        cloudinary_url = os.environ.get("CLOUDINARY_URL")
+        final_url = img_path
+        if cloudinary_url:
+            try:
+                import cloudinary
+                import cloudinary.uploader
+                upload_res = cloudinary.uploader.upload(img_path)
+                final_url = upload_res.get("secure_url")
+            except Exception as e:
+                print(f"Cloudinary upload failed: {e}")
+                
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text("""
+                    UPDATE articles 
+                    SET image_url = :url, image_source = 'gemini_template', image_prompt = :prompt
+                    WHERE id = :id
+                """), {"url": final_url, "prompt": headline_data.get("headline", ""), "id": article_id})
+                
+        return jsonify({
+            "image_url": final_url,
+            "image_source": "gemini_template",
+            "headline_data": headline_data
+        }), 200
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/articles/<int:article_id>/approve', methods=['POST'])
+def approve_article_top30(article_id):
+    try:
+        query = "UPDATE articles SET top_30_selected = TRUE, status = 'top30_selected' WHERE id = :id"
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text(query), {"id": article_id})
+        return jsonify({"status": "approved", "article_id": article_id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/articles/<int:article_id>/discard', methods=['POST'])
+def discard_article(article_id):
+    try:
+        query = "UPDATE articles SET top_30_selected = FALSE, status = 'discarded' WHERE id = :id"
+        with engine.connect() as conn:
+            with conn.begin():
+                conn.execute(text(query), {"id": article_id})
+        return jsonify({"status": "discarded", "article_id": article_id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/pipeline/logs', methods=['GET'])
+def get_pipeline_logs():
+    try:
+        query = """
+            SELECT stage, started_at, completed_at, articles_in, articles_out, error_message as errors
+            FROM pipeline_runs
+            ORDER BY started_at DESC
+            LIMIT 50
+        """
+        with engine.connect() as conn:
+            result = conn.execute(text(query)).mappings().fetchall()
+            logs = []
+            for row in result:
+                r = dict(row)
+                if r.get('started_at'): r['started_at'] = r['started_at'].isoformat()
+                if r.get('completed_at'): r['completed_at'] = r['completed_at'].isoformat()
+                logs.append(r)
+        return jsonify(logs), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == '__main__':

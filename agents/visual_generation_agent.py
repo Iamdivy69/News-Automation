@@ -1,25 +1,22 @@
 import os
 import json
-import shutil
+import time
 import textwrap
-import requests
-from io import BytesIO
-from datetime import datetime, timedelta
-from PIL import Image, ImageDraw, ImageFont
 import urllib.parse
+from io import BytesIO
+import psycopg2
+import psycopg2.extras
+import requests
+import traceback
+from datetime import datetime
+from PIL import Image, ImageDraw, ImageFont
 
-CREATE_IMAGES_TABLE = """
-CREATE TABLE IF NOT EXISTS images (
-    id SERIAL PRIMARY KEY,
-    article_id INT NOT NULL,
-    image_path TEXT NOT NULL,
-    image_type TEXT,
-    is_branded BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
-"""
+from agents.headline_generator import HeadlineGenerator
+from agents.image_renderer import ImageRenderer
 
 class VisualGenerationAgent:
+    AGENT_NAME = "visual_generator"
+    
     CATEGORY_COLORS = {
         "technology": "#0D47A1",
         "business":   "#1B5E20",
@@ -30,47 +27,33 @@ class VisualGenerationAgent:
         "world":      "#004D40",
     }
 
-    def __init__(self, config_path=None):
-        if config_path is None:
-            config_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)),
-                '..', 'config', 'brand_config.json'
-            )
-        config_path = os.path.normpath(config_path)
-        with open(config_path, 'r', encoding='utf-8') as f:
-            self.config = json.load(f)
-        self.project_root = os.path.abspath(
-            os.path.join(os.path.dirname(__file__), '..')
-        )
-        # Store images in date-based subfolders: images/YYYY-MM-DD/
+    def __init__(self):
+        self.conn_string = os.environ.get("DATABASE_URL")
+        
+        self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         today = datetime.now().strftime('%Y-%m-%d')
         self.images_dir = os.path.join(self.project_root, 'images', today)
         os.makedirs(self.images_dir, exist_ok=True)
+        
+        self.headline_gen = HeadlineGenerator()
+        self.renderer = ImageRenderer()
 
-    def cleanup_old_image_folders(self, days_to_keep: int = 7) -> int:
-        """
-        Delete image date-subfolders (format YYYY-MM-DD) that are older
-        than `days_to_keep` days.
-        Returns the count of folders deleted.
-        """
-        images_root = os.path.join(self.project_root, 'images')
-        cutoff = datetime.now() - timedelta(days=days_to_keep)
-        deleted = 0
+    def _get_conn(self):
+        return psycopg2.connect(self.conn_string)
+
+    def _upload_to_cloudinary(self, file_path: str) -> str:
+        cloudinary_url = os.environ.get("CLOUDINARY_URL")
+        if not cloudinary_url:
+            return file_path
+            
         try:
-            for entry in os.scandir(images_root):
-                if not entry.is_dir():
-                    continue
-                try:
-                    folder_date = datetime.strptime(entry.name, '%Y-%m-%d')
-                except ValueError:
-                    continue  # Skip non-date folders (e.g. .gitkeep parent dirs)
-                if folder_date < cutoff:
-                    shutil.rmtree(entry.path)
-                    deleted += 1
-                    print(f"  Deleted old image folder: {entry.name}")
+            import cloudinary
+            import cloudinary.uploader
+            resp = cloudinary.uploader.upload(file_path, folder="synthetix_news")
+            return resp.get("secure_url", file_path)
         except Exception as e:
-            print(f"cleanup_old_image_folders error: {e}")
-        return deleted
+            print(f"Cloudinary upload failed: {e}")
+            return file_path
 
     def _hex_to_rgb(self, hex_str):
         hex_str = hex_str.lstrip('#')
@@ -79,7 +62,6 @@ class VisualGenerationAgent:
         return tuple(int(hex_str[i:i+2], 16) for i in (0, 2, 4))
         
     def _load_font(self, path_list: list, size: int):
-        """Try each font path in order; fall back to PIL default if none found."""
         for font_path in path_list:
             if os.path.exists(font_path):
                 try:
@@ -93,66 +75,38 @@ class VisualGenerationAgent:
 
     def _get_font(self, size):
         font_candidates = [
-            "C:/Windows/Fonts/arialbd.ttf",   # Arial Bold
-            "C:/Windows/Fonts/arial.ttf",      # Arial
-            "C:/Windows/Fonts/calibrib.ttf",   # Calibri Bold
-            "C:/Windows/Fonts/segoeui.ttf",    # Segoe UI
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/calibrib.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
         ]
         return self._load_font(font_candidates, size)
 
-    SAFE_FALLBACK_QUERIES = {
-        "world":       "global news newspaper",
-        "india":       "india city landscape",
-        "technology":  "technology digital screen",
-        "business":    "business office meeting",
-        "sports":      "sports stadium crowd",
-        "health":      "healthcare hospital doctor",
-        "science":     "science laboratory research",
-    }
-
-    def _build_image_query(self, headline, category):
-        query = category or "news"
+    def _validate_image(self, img):
+        result = {"pass": False, "issues": []}
         try:
-            response = requests.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": "mistral",
-                    "stream": False,
-                    "system": "You are a stock photo search expert. Output ONLY a 2-3 word search query for a photorealistic landscape stock photo that visually represents the news headline. No explanations. No quotes. Just the search words.",
-                    "prompt": f"Headline: {headline}\nCategory: {category}"
-                },
-                timeout=15,
-            )
-            response.raise_for_status()
-            data = response.json()
-            q = data.get("response", "").strip()
-            if q:
-                query = q.splitlines()[0].strip()
-        except Exception:
-            pass
-
-        sensitive_words = ["missile", "bomb", "war", "attack", "kill", "dead", "shoot", "crash", "explosion", "protest", "riot"]
-        query_lower = query.lower()
-        has_sensitive = any(word in query_lower for word in sensitive_words)
-        
-        needs_fallback = has_sensitive
-        if not needs_fallback:
-            try:
-                encoded_query = urllib.parse.quote(query)
-                url = f"https://api.pexels.com/v1/search?query={encoded_query}&per_page=1"
-                headers = {"Authorization": os.environ.get("PEXELS_API_KEY", "")}
-                test_resp = requests.get(url, headers=headers, timeout=5)
-                test_resp.raise_for_status()
-                if test_resp.json().get("total_results", 0) == 0:
-                    needs_fallback = True
-            except Exception:
-                needs_fallback = True
-                
-        if needs_fallback:
-            cat_safe = (category or "").lower()
-            return self.SAFE_FALLBACK_QUERIES.get(cat_safe, "breaking news world")
+            if img.width < 800:
+                result["issues"].append("width < 800")
+                return result
             
-        return query
+            gray = img.convert("L")
+            extrema = gray.getextrema()
+            if extrema[0] == extrema[1]:
+                result["issues"].append("blank image")
+                return result
+                
+            from PIL import ImageStat
+            stat = ImageStat.Stat(gray)
+            avg_luminance = stat.mean[0]
+            if avg_luminance < 15 or avg_luminance > 240:
+                result["issues"].append("too dark/light")
+                return result
+                
+            result["pass"] = True
+        except Exception as e:
+            result["issues"].append(f"corrupted file: {e}")
+            
+        return result
 
     def _fetch_pexels_photo(self, query):
         if not query:
@@ -161,30 +115,23 @@ class VisualGenerationAgent:
         url = f"https://api.pexels.com/v1/search?query={encoded_query}&per_page=5&orientation=landscape"
         headers = {"Authorization": os.environ.get("PEXELS_API_KEY", "")}
         
-        try:
-            response = requests.get(url, headers=headers, timeout=8)
-            response.raise_for_status()
-            data = response.json()
+        response = requests.get(url, headers=headers, timeout=8)
+        response.raise_for_status()
+        data = response.json()
+        
+        photos = data.get("photos", [])
+        if not photos:
+            raise ValueError("No photos found")
             
-            photos = data.get("photos", [])
-            if not photos:
-                raise ValueError("No photos found")
-                
-            photo_url = photos[0]["src"]["landscape"]
-            
-            img_response = requests.get(photo_url, timeout=10)
-            img_response.raise_for_status()
-            
-            base_image = Image.open(BytesIO(img_response.content))
-            return base_image.resize((1200, 630), getattr(Image, 'Resampling', Image).LANCZOS)
-        except requests.RequestException as e:
-            raise ConnectionError(f"Request failed: {e}")
+        photo_url = photos[0]["src"]["landscape"]
+        
+        img_response = requests.get(photo_url, timeout=10)
+        img_response.raise_for_status()
+        
+        base_image = Image.open(BytesIO(img_response.content))
+        return base_image.resize((1200, 630), getattr(Image, 'Resampling', Image).LANCZOS)
 
     def _overlay_text(self, image, headline, source, brand_name, tagline, accent_hex, is_breaking, category=None, viral_score=0):
-        """
-        Composites a polished multi-layer UI overlay onto the image.
-        Returns an RGB PIL Image.
-        """
         try:
             BOLD_FONTS = [
                 "C:/Windows/Fonts/arialbd.ttf",
@@ -206,15 +153,13 @@ class VisualGenerationAgent:
 
             accent_rgb = self._hex_to_rgb(accent_hex)
             image = image.convert("RGBA")
-            W, H = image.size  # expected: 1200 x 630
+            W, H = image.size
 
-            # ── Layer 1: dark bottom overlay (y 400..630, alpha 120) ──────────
             overlay1 = Image.new('RGBA', image.size, (0, 0, 0, 0))
             d1 = ImageDraw.Draw(overlay1)
             d1.rectangle([0, 400, W, H], fill=(0, 0, 0, 120))
             image = Image.alpha_composite(image, overlay1)
 
-            # ── Layer 2: accent top-border on dark overlay (y 400..418, alpha 200) ──
             overlay2 = Image.new('RGBA', image.size, (0, 0, 0, 0))
             d2 = ImageDraw.Draw(overlay2)
             d2.rectangle([0, 400, W, 418], fill=(*accent_rgb, 200))
@@ -222,7 +167,6 @@ class VisualGenerationAgent:
 
             draw = ImageDraw.Draw(image)
 
-            # ── Category colour pill (top-left) ───────────────────────────────
             cat_lower   = (category or "world").lower()
             pill_hex    = self.CATEGORY_COLORS.get(cat_lower, accent_hex)
             pill_rgb    = self._hex_to_rgb(pill_hex)
@@ -247,31 +191,26 @@ class VisualGenerationAgent:
                 anchor="mm"
             )
 
-            # ── Viral score bar (top-right) ───────────────────────────────────
             score_val  = max(0, min(100, int(viral_score or 0)))
             bar_x, bar_y = W - 140, 20
             bar_w, bar_h = 120, 8
             label_text  = f"Score: {score_val}"
 
             draw.text((bar_x, bar_y - 16), label_text, font=font_score, fill=(255, 255, 255), anchor="la")
-            draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(60, 60, 60))  # bg
+            draw.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], fill=(60, 60, 60))
             fg_w = int(score_val / 100 * bar_w)
             if fg_w > 0:
                 draw.rectangle([bar_x, bar_y, bar_x + fg_w, bar_y + bar_h], fill=accent_rgb)
 
-            # ── Headline text with shadow (y starting at 420) ─────────────────
             wrapped = textwrap.wrap(headline or "", width=48)
             line_h  = 46
             text_y  = 420
 
             for i, line in enumerate(wrapped[:3]):
-                # Shadow (black, offset +2/+2)
                 draw.text((26, text_y + 2), line, font=font_headline, fill=(0, 0, 0, 80), anchor="la")
-                # Main white text
                 draw.text((24, text_y), line, font=font_headline, fill=(255, 255, 255), anchor="la")
                 text_y += line_h
 
-            # ── Source + brand footer ─────────────────────────────────────────
             draw.text((24, 596), source or "", font=font_source, fill=(170, 170, 170), anchor="la")
             draw.text((W - 24, 582), brand_name or "", font=font_brand, fill=accent_rgb, anchor="ra")
             draw.text((W - 24, 606), tagline or "", font=font_tagline, fill=(136, 136, 136), anchor="ra")
@@ -279,8 +218,6 @@ class VisualGenerationAgent:
             return image.convert("RGB")
 
         except Exception as exc:
-            print(f"_overlay_text error (falling back to basic): {exc}")
-            # Minimal safe fallback
             image = image.convert("RGB")
             draw = ImageDraw.Draw(image)
             font = self._get_font(28)
@@ -288,96 +225,138 @@ class VisualGenerationAgent:
                 draw.text((24, 420 + i * 42), line, font=font, fill=(255, 255, 255))
             return image
 
-    def generate_headline_card(self, headline, source, category, is_breaking, output_path=None, article_id=None, viral_score=0):
-        import time
-        if article_id is None:
-            output_path = os.path.join(self.images_dir, f"card_{int(time.time())}.png")
-        else:
-            output_path = os.path.join(self.images_dir, f"{article_id}_card.png")
+    def run(self):
+        conn = self._get_conn()
+        if not conn:
+            print("No DATABASE_URL configured.")
+            return {}
             
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            
+        metrics = {
+            "processed": 0,
+            "gemini_template": 0,
+            "pexels_fallback": 0,
+            "failed": 0
+        }
+        
         try:
-            query = self._build_image_query(headline, category)
-            base_image = self._fetch_pexels_photo(query)
-            final_image = self._overlay_text(
-                base_image,
-                headline,
-                source,
-                self.config["brand_name"],
-                self.config["tagline"],
-                self.config["accent_color"],
-                is_breaking,
-                category=category,
-                viral_score=viral_score,
-            )
-            final_image.save(output_path, format="PNG")
-            print(f"  [Pexels] {article_id}: query='{query}'")
-            return output_path
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                cur.execute("""
+                    SELECT id, headline, full_text, category, is_breaking, source, viral_score
+                    FROM articles 
+                    WHERE status = 'summarised' AND top_30_selected = TRUE 
+                    LIMIT 30
+                """)
+                articles = cur.fetchall()
         except Exception as e:
-            print(f"  [Fallback to solid card] {e}")
-            # Call the original solid-color generation logic as fallback
-            width, height = 1200, 630
+            print(f"Error fetching articles: {e}")
+            conn.close()
+            return metrics
             
-            # Background mapping
-            primary_hex = self.CATEGORY_COLORS.get(
-                (category or "").lower(),
-                self.config.get("primary_color", "#1E3A8A")
-            )
-            bg_rgb = self._hex_to_rgb(primary_hex)
+        for db_art in articles:
+            article_id = db_art["id"]
             
-            img = Image.new("RGB", (width, height), color=bg_rgb)
-            draw = ImageDraw.Draw(img)
+            art_dict = {
+                "id": article_id,
+                "title": db_art.get("headline", ""),
+                "summary": db_art.get("full_text", "")[:500] if db_art.get("full_text") else "",
+                "category": db_art.get("category", ""),
+                "is_breaking": db_art.get("is_breaking", False),
+                "source": db_art.get("source", ""),
+                "viral_score": db_art.get("viral_score", 0)
+            }
             
-            if is_breaking:
-                # Red breaking news banner across top 60px
-                draw.rectangle([(0, 0), (width, 60)], fill="#C62828")
-                font_breaking = self._get_font(22)
-                # anchor 'mm' strictly centers the text both horizontally and vertically
-                draw.text((width // 2, 30), "BREAKING NEWS", font=font_breaking, fill="#FFFFFF", anchor="mm")
+            try:
+                # 2a. Call HeadlineGenerator
+                headline_data = self.headline_gen.generate(art_dict)
                 
-            font_headline = self._get_font(38)
-            wrapped_lines = textwrap.wrap(headline or "", width=42)
-            
-            # Inject textual data dynamically auto-wrapping at 42 lines starting at Y=120
-            current_y = 120
-            line_height = 45 
-            for line in wrapped_lines:
-                # anchor 'ma' strictly horizontally centers the text aligning to the top
-                draw.text((width // 2, current_y), line, font=font_headline, fill="#FFFFFF", anchor="ma")
-                current_y += line_height
+                # Combine data for renderer
+                render_data = headline_data.copy()
+                render_data.update(art_dict)
                 
-            # Draw aesthetic border split
-            accent_hex = self.config.get("accent_color", "#00E5FF")
-            draw.line([(0, 480), (width, 480)], fill=accent_hex, width=2)
-            
-            # Footer components (Left Source signature)
-            font_source = self._get_font(20)
-            draw.text((40, 500), source or "", font=font_source, fill="#BBBBBB", anchor="la")
-            
-            # Footer components (Right Corporate signatures)
-            brand_name = self.config.get("brand_name", "")
-            # right-aligned constraint `ra` ensures variable width string anchors precisely to the margin
-            draw.text((1160, 500), brand_name, font=font_source, fill=accent_hex, anchor="ra")
-            
-            tagline = self.config.get("tagline", "")
-            font_tagline = self._get_font(15)
-            # Below the brand name boundary
-            draw.text((1160, 528), tagline, font=font_tagline, fill="#888888", anchor="ra")
-            
-            # Safety enforcement on path constraints
-            os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-            img.save(output_path, format="PNG")
-            
-            return output_path
+                fname = f"{article_id}_render_{int(time.time())}.jpg"
+                output_path = os.path.join(self.images_dir, fname)
+                
+                try:
+                    # 2b. Call ImageRenderer
+                    final_path = self.renderer.render(render_data, output_path)
+                    source_label = "gemini_template"
+                    metrics["gemini_template"] += 1
+                except Exception as render_err:
+                    print(f"ImageRenderer failed for {article_id}: {render_err}. Trying Pexels fallback.")
+                    # 3. FALLBACK: Call old Pexels fetch using pexels_fallback query logic
+                    category = (art_dict.get("category") or "").lower()
+                    pexels_fallback = "breaking news event"
+                    if "tech" in category: pexels_fallback = "futuristic product launch"
+                    elif "politic" in category: pexels_fallback = "podium parliament"
+                    elif "financ" in category or "stock" in category: pexels_fallback = "stock market office"
+                    elif "sport" in category: pexels_fallback = "stadium crowd"
+                    elif "war" in category: pexels_fallback = "command room world map"
+                    elif "scienc" in category: pexels_fallback = "lab discovery"
+                    elif "weather" in category: pexels_fallback = "storm satellite"
 
-    def save_image_record(self, article_id, image_path, image_type, db_conn):
-        with db_conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO images (article_id, image_path, image_type, is_branded)
-                VALUES (%s, %s, %s, TRUE)
-                """,
-                (article_id, image_path, image_type)
-            )
-        db_conn.commit()
+                    base_image = self._fetch_pexels_photo(pexels_fallback)
+                    
+                    is_breaking_flag = any(w in art_dict.get("title", "").lower() for w in ["breaking", "urgent"])
+                    
+                    final_image = self._overlay_text(
+                        base_image,
+                        headline_data.get("headline", art_dict.get("title", "")),
+                        art_dict.get("source", ""),
+                        "Synthetix News",
+                        "Real-time updates",
+                        "#E53935",
+                        is_breaking_flag,
+                        category=art_dict.get("category"),
+                        viral_score=art_dict.get("viral_score", 0)
+                    )
+                    final_image.save(output_path, format="JPEG", quality=90)
+                    final_path = output_path
+                    source_label = "pexels_fallback"
+                    metrics["pexels_fallback"] += 1
+                
+                # 2c. Upload to Cloudinary (if set) or use local path
+                uploaded_url = self._upload_to_cloudinary(final_path)
+                
+                # 2d. UPDATE DB
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE articles SET
+                            image_url = %s,
+                            image_prompt = %s,
+                            image_source = %s,
+                            status = 'image_ready',
+                            processing_stage = 'image_ready',
+                            updated_at = NOW()
+                        WHERE id = %s
+                    """, (
+                        uploaded_url,
+                        headline_data.get("headline", ""),
+                        source_label,
+                        article_id
+                    ))
+                conn.commit()
+                metrics["processed"] += 1
+                
+            except Exception as e:
+                conn.rollback()
+                print(f"Error processing article {article_id}: {e}")
+                metrics["failed"] += 1
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO error_logs (agent, message, stack_trace) VALUES (%s, %s, %s)",
+                            (self.AGENT_NAME, f"Visual generation error for article {article_id}: {e}", traceback.format_exc())
+                        )
+                    conn.commit()
+                except:
+                    pass
+                
+        conn.close()
+        print(f"[VISUAL] processed={metrics['processed']} gemini_template={metrics['gemini_template']} pexels_fallback={metrics['pexels_fallback']} failed={metrics['failed']}")
+        return metrics
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
+    agent = VisualGenerationAgent()
+    agent.run()

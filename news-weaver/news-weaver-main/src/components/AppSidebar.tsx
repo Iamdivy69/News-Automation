@@ -2,17 +2,17 @@ import { useState } from "react";
 import { NavLink, useLocation } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import {
-  Newspaper, BarChart3, Share2, Settings, Activity,
-  ChevronLeft, ChevronRight, Zap,
+  Activity, BarChart3, Cpu, LayoutDashboard,
+  Share2, ChevronLeft, ChevronRight, Zap,
 } from "lucide-react";
 import { fetchPipelineStatus } from "@/lib/api";
 
 const navItems = [
-  { label: "Feed", path: "/", icon: Newspaper },
-  { label: "Analytics", path: "/analytics", icon: BarChart3 },
-  { label: "Platform Tracker", path: "/platforms", icon: Share2 },
-  { label: "Control Panel", path: "/control", icon: Settings },
-  { label: "System Health", path: "/health", icon: Activity },
+  { label: "Pipeline Monitor", path: "/",               icon: LayoutDashboard },
+  { label: "Top 30 Content",   path: "/feed",           icon: Cpu },
+  { label: "Platform Posts",   path: "/platform-tracker", icon: Share2 },
+  { label: "Analytics",        path: "/analytics",      icon: BarChart3 },
+  { label: "System Health",    path: "/health",         icon: Activity },
 ];
 
 export default function AppSidebar() {
@@ -25,15 +25,9 @@ export default function AppSidebar() {
     refetchInterval: 10000,
   });
 
-  // Derive a simple status string from the API shape
   const isRunning = pipelineStatus?.is_running;
   const isOffline = pipelineStatus?.status === "offline";
   const statusLabel = isRunning ? "Running" : isOffline ? "Offline" : "Idle";
-  const dotClass = isRunning
-    ? "status-dot-running"
-    : isOffline
-    ? "status-dot-error"
-    : "status-dot-idle";
 
   return (
     <aside
@@ -43,18 +37,23 @@ export default function AppSidebar() {
     >
       {/* Logo */}
       <div className="flex h-16 items-center gap-2 border-b border-border px-4">
-        <Zap className="h-6 w-6 shrink-0 text-primary" />
+        <Zap className="h-5 w-5 shrink-0 text-primary" />
         {!collapsed && (
-          <span className="text-sm font-bold tracking-tight text-foreground">
+          <span className="text-sm font-black tracking-tight text-foreground">
             Synthetix News
           </span>
         )}
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 space-y-1 p-2">
+      <nav className="flex-1 space-y-0.5 p-2 pt-3">
         {navItems.map((item) => {
-          const isActive = location.pathname === item.path;
+          const isActive =
+            item.path === "/"
+              ? location.pathname === "/"
+              : location.pathname.startsWith(item.path);
+          const isPipelineMonitor = item.path === "/";
+
           return (
             <NavLink
               key={item.path}
@@ -65,19 +64,36 @@ export default function AppSidebar() {
                   : "text-muted-foreground hover:bg-secondary hover:text-foreground"
               }`}
             >
-              <item.icon className="h-4.5 w-4.5 shrink-0" />
-              {!collapsed && <span>{item.label}</span>}
+              <item.icon className="h-4 w-4 shrink-0" />
+              {!collapsed && (
+                <span className="flex-1 truncate">{item.label}</span>
+              )}
+              {/* Pulsing dot on Pipeline Monitor when running */}
+              {!collapsed && isPipelineMonitor && isRunning && (
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75" />
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+                </span>
+              )}
             </NavLink>
           );
         })}
       </nav>
 
-      {/* Pipeline status */}
+      {/* Pipeline status footer */}
       <div className="border-t border-border p-3">
         <div className="flex items-center gap-2">
-          <span className={`status-dot ${dotClass}`} />
+          <span
+            className={`h-2 w-2 rounded-full shrink-0 ${
+              isRunning
+                ? "bg-green-500 animate-pulse"
+                : isOffline
+                ? "bg-red-500"
+                : "bg-muted-foreground/30"
+            }`}
+          />
           {!collapsed && (
-            <span className="text-xs text-muted-foreground">
+            <span className="text-xs text-muted-foreground truncate">
               Pipeline {statusLabel}
             </span>
           )}
@@ -89,7 +105,11 @@ export default function AppSidebar() {
         onClick={() => setCollapsed(!collapsed)}
         className="flex h-10 items-center justify-center border-t border-border text-muted-foreground transition-colors hover:text-foreground"
       >
-        {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+        {collapsed ? (
+          <ChevronRight className="h-4 w-4" />
+        ) : (
+          <ChevronLeft className="h-4 w-4" />
+        )}
       </button>
     </aside>
   );

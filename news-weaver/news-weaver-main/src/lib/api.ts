@@ -35,6 +35,24 @@ export const fetchArticles = async (params?: {
 export const fetchArticle = (id: string | number) =>
   apiFetch(`/articles/${id}`);
 
+export const fetchTop30 = async () => {
+  try {
+    const data = await apiFetch('/articles/top30');
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+};
+
+export const patchArticle = (id: string | number, data: any) => 
+  apiFetch(`/articles/${id}`, { method: 'PATCH', body: JSON.stringify(data) });
+
+export const regenerateImage = (id: string | number) => 
+  apiFetch(`/articles/${id}/regenerate-image`, { method: 'POST' });
+
+export const discardArticle = (id: string | number) => 
+  apiFetch(`/articles/${id}/discard`, { method: 'POST' });
+
 /** Returns a direct image URL string — use in <img src={...}> */
 export const fetchArticleImage = (id: string | number) =>
   `${BASE}/articles/${id}/image`;
@@ -51,6 +69,16 @@ export const fetchPipelineStatus = async () => {
     };
   } catch {
     return { is_running: false, status: "offline", last_run: null };
+  }
+};
+
+export const fetchPipelineStages = () => apiFetch('/pipeline/stages');
+
+export const fetchPipelineLogs = async () => {
+  try {
+    return await apiFetch('/pipeline/logs');
+  } catch {
+    return [];
   }
 };
 
@@ -174,6 +202,9 @@ export const approvePost = async (id: string | number) =>
 export const rejectPost = async (id: string | number) =>
   apiFetch(`/posts/${id}/reject`, { method: "POST" });
 
+export const clearQueue = async () =>
+  apiFetch(`/posts/queue`, { method: "DELETE" });
+
 // ── Health ────────────────────────────────────────────────────────────────────
 
 export const fetchHealth = async () => {
@@ -182,28 +213,51 @@ export const fetchHealth = async () => {
     return {
       postgresql: {
         status: data.postgresql === "ok" ? "connected" : "error",
-        details:
-          data.postgresql === "ok"
-            ? "Connected successfully"
-            : "Connection failed — check PostgreSQL service",
+        details: data.postgresql === "ok" ? "Connected successfully" : "Connection failed",
       },
       ollama: {
         status: data.ollama === "ok" ? "healthy" : "error",
-        details:
-          data.ollama === "ok"
-            ? "Running and responding"
-            : "Offline — run: ollama serve",
+        details: data.ollama === "ok" ? "Running mistral" : "Offline",
+      },
+      gemini: {
+        status: data.gemini === "ok" ? "healthy" : "error",
+        details: data.gemini === "ok" ? "Gemini API ready" : "Offline or invalid key",
+      },
+      pexels: {
+        status: data.pexels === "ok" ? "healthy" : data.pexels === "disabled" ? "disabled" : "error",
+        details: data.pexels === "ok"
+          ? "Fallback API ready"
+          : data.pexels === "disabled"
+          ? "Not configured"
+          : "Offline",
+      },
+      cloudinary: {
+        status: data.cloudinary === "ok" ? "healthy" : "disabled",
+        details: data.cloudinary === "ok" ? "CDN connected" : "Not configured",
+      },
+      metrics: {
+        total_articles:   data.metrics?.total_articles   ?? null,
+        published_today:  data.metrics?.published_today  ?? null,
+        avg_viral_score:  data.metrics?.avg_viral_score  ?? null,
+        top30_rate:       data.metrics?.top30_rate       ?? null,
       },
       timestamp: data.timestamp ?? null,
     };
   } catch {
     return {
-      postgresql: { status: "unknown", details: "Checking..." },
-      ollama: { status: "unknown", details: "Checking..." },
-      timestamp: null,
+      postgresql:  { status: "unknown", details: "Checking..." },
+      ollama:      { status: "unknown", details: "Checking..." },
+      gemini:      { status: "unknown", details: "Checking..." },
+      pexels:      { status: "unknown", details: "Checking..." },
+      cloudinary:  { status: "unknown", details: "Checking..." },
+      metrics:     { total_articles: null, published_today: null, avg_viral_score: null, top30_rate: null },
+      timestamp:   null,
     };
   }
 };
+
+/** Alias: same as fetchHealth, used from Health.tsx */
+export const fetchStageHealth = fetchHealth;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

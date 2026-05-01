@@ -2,9 +2,9 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   fetchPipelineStatus, runPipeline, fetchPipelineHistory,
-  fetchPendingApproval, fetchQueuedPosts, approvePost, rejectPost,
+  fetchPendingApproval, fetchQueuedPosts, approvePost, rejectPost, clearQueue,
 } from "@/lib/api";
-import { Play, CheckCircle, XCircle, Clock, Zap } from "lucide-react";
+import { Play, CheckCircle, XCircle, Clock, Zap, Trash2 } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { toast } from "sonner";
 
@@ -69,6 +69,15 @@ export default function ControlPanel() {
     onError: () => toast.error("Reject failed"),
   });
 
+  const clearQueueMutation = useMutation({
+    mutationFn: clearQueue,
+    onSuccess: (data) => {
+      toast.success(`Cleared ${data?.count ?? 0} articles from the queue`);
+      queryClient.invalidateQueries({ queryKey: ["queuedPosts"] });
+    },
+    onError: () => toast.error("Failed to clear queue"),
+  });
+
   const lastRun = status?.last_run ?? {};
 
   return (
@@ -123,7 +132,7 @@ export default function ControlPanel() {
       <div className="rounded-lg border border-border bg-card p-6">
         <div className="mb-4 flex items-center justify-between">
           <h3 className="text-lg font-semibold text-foreground">Content Queues</h3>
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
             <button
               onClick={() => setActiveTab("approval")}
               className={`rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
@@ -140,6 +149,17 @@ export default function ControlPanel() {
             >
               Publishing Queue ({(Array.isArray(queuedArticles) ? queuedArticles : []).length})
             </button>
+            {activeTab === "queued" && (Array.isArray(queuedArticles) ? queuedArticles : []).length > 0 && (
+              <button
+                onClick={() => clearQueueMutation.mutate()}
+                disabled={clearQueueMutation.isPending}
+                className="flex items-center gap-1.5 rounded-md bg-destructive/15 px-3 py-1.5 text-sm font-medium text-destructive transition-colors hover:bg-destructive/25 active:scale-95 disabled:opacity-50"
+                title="Clear all queued articles"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {clearQueueMutation.isPending ? "Clearing..." : "Clear Queue"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -149,20 +169,28 @@ export default function ControlPanel() {
             <>
               {(Array.isArray(pendingArticles) ? pendingArticles : []).map((article: any) => (
                 <div key={article.id} className="flex items-center justify-between rounded-lg bg-muted/50 p-4">
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-foreground">{article.headline}</p>
-                    <div className="mt-1 flex items-center gap-2">
-                      {article.source && <span className="text-xs text-muted-foreground">{article.source}</span>}
-                      {article.viral_score != null && <span className="text-xs text-primary">Score: {article.viral_score}</span>}
+                  <div className="flex items-center gap-4 w-full">
+                    <img
+                      src={`/api/articles/${article.id}/image`}
+                      alt=""
+                      className="h-16 w-24 shrink-0 rounded-md object-cover bg-muted"
+                      onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                    />
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-sm font-medium text-foreground">{article.headline}</p>
+                      <div className="mt-1 flex items-center gap-2">
+                        {article.source && <span className="text-xs text-muted-foreground">{article.source}</span>}
+                        {article.viral_score != null && <span className="text-xs text-primary">Score: {article.viral_score}</span>}
+                      </div>
                     </div>
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    <button onClick={() => approveMutation.mutate(article.id)} className="rounded-md bg-success/15 p-2 text-success transition-colors hover:bg-success/25 active:scale-95" title="Approve">
-                      <CheckCircle className="h-4 w-4" />
-                    </button>
-                    <button onClick={() => rejectMutation.mutate(article.id)} className="rounded-md bg-destructive/15 p-2 text-destructive transition-colors hover:bg-destructive/25 active:scale-95" title="Reject">
-                      <XCircle className="h-4 w-4" />
-                    </button>
+                    <div className="flex shrink-0 gap-2">
+                      <button onClick={() => approveMutation.mutate(article.id)} className="rounded-md bg-success/15 p-2 text-success transition-colors hover:bg-success/25 active:scale-95" title="Approve">
+                        <CheckCircle className="h-4 w-4" />
+                      </button>
+                      <button onClick={() => rejectMutation.mutate(article.id)} className="rounded-md bg-destructive/15 p-2 text-destructive transition-colors hover:bg-destructive/25 active:scale-95" title="Reject">
+                        <XCircle className="h-4 w-4" />
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))}
