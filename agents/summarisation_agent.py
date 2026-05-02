@@ -174,11 +174,19 @@ class SummarisationAgent:
                 }
                 
                 with conn.cursor() as cur:
+<<<<<<< HEAD
+=======
+                    # Guard: article may have been purged while Ollama was running
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
                     cur.execute("SELECT 1 FROM articles WHERE id = %s", (article_id,))
                     if not cur.fetchone():
                         print(f"  [skipped] Article {article_id} was purged before summary could be saved.")
                         continue
 
+<<<<<<< HEAD
+=======
+                    # 5) Save outputs to summaries table
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
                     cur.execute(
                         """
                         INSERT INTO summaries (article_id, twitter_text, linkedin_text, instagram_caption, facebook_text, hashtags, tone, is_branded)

@@ -2,6 +2,7 @@ import os
 import json
 import time
 import textwrap
+<<<<<<< HEAD
 import urllib.parse
 from io import BytesIO
 import psycopg2
@@ -13,6 +14,16 @@ from PIL import Image, ImageDraw, ImageFont
 
 from agents.headline_generator import HeadlineGenerator
 from agents.image_renderer import ImageRenderer
+=======
+import requests
+import time
+from io import BytesIO
+from datetime import datetime, timedelta
+from PIL import Image, ImageDraw, ImageFont
+import urllib.parse
+import psycopg2
+import psycopg2.extras
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
 
 class VisualGenerationAgent:
     AGENT_NAME = "visual_generator"
@@ -27,14 +38,35 @@ class VisualGenerationAgent:
         "world":      "#004D40",
     }
 
+<<<<<<< HEAD
     def __init__(self):
         self.conn_string = os.environ.get("DATABASE_URL")
         
         self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+=======
+    def __init__(self, config_path=None):
+        self.conn_string = os.environ.get("DATABASE_URL")
+        if config_path is None:
+            config_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                '..', 'config', 'brand_config.json'
+            )
+        config_path = os.path.normpath(config_path)
+        if os.path.exists(config_path):
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self.config = json.load(f)
+        else:
+            self.config = {"brand_name": "Synthetix News", "tagline": "Real-time updates", "accent_color": "#E53935"}
+            
+        self.project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), '..')
+        )
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
         today = datetime.now().strftime('%Y-%m-%d')
         self.images_dir = os.path.join(self.project_root, 'images', today)
         os.makedirs(self.images_dir, exist_ok=True)
         
+<<<<<<< HEAD
         self.headline_gen = HeadlineGenerator()
         self.renderer = ImageRenderer()
 
@@ -54,6 +86,10 @@ class VisualGenerationAgent:
         except Exception as e:
             print(f"Cloudinary upload failed: {e}")
             return file_path
+=======
+        self.ollama_url = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+        self.ollama_model = os.environ.get("OLLAMA_MODEL", "mistral")
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
 
     def _hex_to_rgb(self, hex_str):
         hex_str = hex_str.lstrip('#')
@@ -82,6 +118,7 @@ class VisualGenerationAgent:
         ]
         return self._load_font(font_candidates, size)
 
+<<<<<<< HEAD
     def _validate_image(self, img):
         result = {"pass": False, "issues": []}
         try:
@@ -89,6 +126,134 @@ class VisualGenerationAgent:
                 result["issues"].append("width < 800")
                 return result
             
+=======
+    def _get_visual_concept(self, article):
+        # FAST LOCAL CATEGORY FALLBACK base
+        fallback = {
+            "entities": {"people": [], "companies": [], "places": [], "event_type": "news"},
+            "visual_scene": "breaking news event",
+            "mood": "urgent",
+            "camera": "wide shot",
+            "style": "photorealistic",
+            "lighting": "dramatic",
+            "color_palette": "muted",
+            "dalle_prompt": "",
+            "pexels_fallback": "breaking news event"
+        }
+        category = (article.get("category") or "").lower()
+        if "tech" in category: fallback["pexels_fallback"] = "futuristic product launch"
+        elif "politic" in category: fallback["pexels_fallback"] = "podium parliament"
+        elif "financ" in category or "stock" in category: fallback["pexels_fallback"] = "stock market office"
+        elif "sport" in category: fallback["pexels_fallback"] = "stadium crowd"
+        elif "war" in category: fallback["pexels_fallback"] = "command room world map"
+        elif "scienc" in category: fallback["pexels_fallback"] = "lab discovery"
+        elif "weather" in category: fallback["pexels_fallback"] = "storm satellite"
+
+        system_prompt = """You are a world-class creative director for viral news media.
+
+Your job is to analyze a news headline and extract a precise visual concept for image generation.
+
+RULES:
+1. Identify named entities: people, companies, places, events
+2. Determine PRIMARY visual scene
+3. Choose mood: urgent | celebratory | somber | shocking | professional | dramatic
+4. Choose camera: aerial | close-up | wide shot | portrait | documentary | cinematic
+5. NEVER use real faces. Use silhouettes, hands, buildings, objects, environments.
+6. NEVER include text or logos.
+7. Match emotional tone.
+
+CATEGORY TEMPLATES:
+Technology: product on minimalist stage, LED lighting, futuristic
+Politics: empty podium, parliament hall
+Finance: trading floor, charts screens
+Sports: stadium action, crowd energy
+War: command room, map room, red urgent lighting, no violence
+Entertainment: red carpet, spotlight glamour
+Science: laboratory, glowing specimen
+Weather: storm system, satellite clouds
+
+OUTPUT JSON:
+{
+ "entities": {
+   "people": [],
+   "companies": [],
+   "places": [],
+   "event_type": ""
+ },
+ "visual_scene": "",
+ "mood": "",
+ "camera": "",
+ "style": "",
+ "lighting": "",
+ "color_palette": "",
+ "dalle_prompt": "",
+ "pexels_fallback": "category + object + place keywords max 5 words"
+}"""
+
+        user_prompt = f"Headline: {article.get('title')}\nSummary: {article.get('summary')}\nCategory: {article.get('category')}\nEmotion: {article.get('emotion')}"
+        
+        payload = {
+            "model": self.ollama_model,
+            "prompt": user_prompt,
+            "system": system_prompt,
+            "stream": False,
+            "format": "json"
+        }
+        
+        try:
+            resp = requests.post(self.ollama_url, json=payload, timeout=12)
+            if resp.status_code == 200:
+                text = resp.json().get("response", "").strip()
+                if text.startswith("```json"): text = text[7:-3].strip()
+                elif text.startswith("```"): text = text[3:-3].strip()
+                data = json.loads(text)
+                if "dalle_prompt" in data:
+                    return data
+        except Exception as e:
+            pass
+            
+        return fallback
+
+    def _generate_ai_image(self, prompt):
+        dalle_key = os.environ.get("OPENAI_API_KEY")
+        if not dalle_key:
+            raise ValueError("No API key for AI generation")
+            
+        resp = requests.post(
+            "https://api.openai.com/v1/images/generations",
+            headers={"Authorization": f"Bearer {dalle_key}"},
+            json={
+                "model": "dall-e-3",
+                "prompt": prompt,
+                "size": "1024x1024",
+                "quality": "standard",
+                "n": 1,
+            },
+            timeout=35
+        )
+        resp.raise_for_status()
+        url = resp.json()["data"][0]["url"]
+        img_resp = requests.get(url, timeout=15)
+        img = Image.open(BytesIO(img_resp.content))
+        img = img.resize((1200, 1200))
+        return img.crop((0, 285, 1200, 915))
+        
+    def _validate_image(self, img, concept, article, is_ai=False):
+        result = {
+            "pass": False,
+            "relevance_score": 0,
+            "quality_score": 0,
+            "issues": [],
+            "regenerate_reason": None,
+            "use_fallback": False
+        }
+        
+        try:
+            if img.width < 800:
+                result["issues"].append("width < 800")
+                return result
+            
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
             gray = img.convert("L")
             extrema = gray.getextrema()
             if extrema[0] == extrema[1]:
@@ -102,9 +267,116 @@ class VisualGenerationAgent:
                 result["issues"].append("too dark/light")
                 return result
                 
+<<<<<<< HEAD
             result["pass"] = True
         except Exception as e:
             result["issues"].append(f"corrupted file: {e}")
+=======
+            import hashlib
+            img_small = gray.resize((16, 16))
+            h = hashlib.md5(img_small.tobytes()).hexdigest()
+            if not hasattr(self, '_recent_hashes'):
+                self._recent_hashes = []
+            if h in self._recent_hashes:
+                result["issues"].append("duplicate hash")
+                return result
+            self._recent_hashes.append(h)
+            if len(self._recent_hashes) > 200:
+                self._recent_hashes.pop(0)
+                
+            result["pass"] = True
+        except Exception as e:
+            result["issues"].append(f"corrupted file: {e}")
+            result["pass"] = False
+            return result
+
+        if not is_ai or not result["pass"]:
+            return result
+            
+        try:
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                return result
+                
+            import base64
+            buffered = BytesIO()
+            img.copy().resize((512, 512)).save(buffered, format="JPEG")
+            img_str = base64.b64encode(buffered.getvalue()).decode()
+            
+            cat = article.get("category", "").lower()
+            special_rules = ""
+            if "war" in cat or "conflict" in cat:
+                special_rules = "If category = war/conflict: No explosions, blood, corpses."
+            elif "politic" in cat:
+                special_rules = "If category = politics: No fake politician faces."
+            elif "financ" in cat:
+                special_rules = "If category = finance: Prefer markets/buildings/charts."
+            elif "tech" in cat:
+                special_rules = "If category = technology: Prefer devices/stage/products."
+                
+            sys_prompt = f"""You are a quality control inspector for news images.
+You receive a news headline and a generated image.
+Validate whether the image is appropriate and relevant.
+
+CHECK FOR:
+1. RELEVANCE: Does image visually represent headline topic?
+2. QUALITY: Sharp, clear, not blurry or pixelated?
+3. SAFETY: No gore, violence, nudity, disturbing content.
+4. ACCURACY: No wrong people, wrong flags, wrong logos.
+5. GENERIC: Not a useless generic stock image.
+6. TEXT: No unwanted text or watermarks.
+
+PASS RULE:
+Image relevance score must be >= 7/10
+{special_rules}
+
+OUTPUT JSON:
+{{
+ "pass": true,
+ "relevance_score": 0,
+ "quality_score": 0,
+ "issues": [],
+ "regenerate_reason": null,
+ "use_fallback": false
+}}"""
+            
+            user_content = [
+                {"type": "text", "text": f"Headline: {article.get('title')}\nSummary: {article.get('summary')}"},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_str}"}}
+            ]
+            
+            resp = requests.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={
+                    "model": "gpt-4o",
+                    "response_format": {"type": "json_object"},
+                    "messages": [
+                        {"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user_content}
+                    ],
+                    "max_tokens": 300
+                },
+                timeout=8
+            )
+            
+            if resp.status_code == 200:
+                ai_data = json.loads(resp.json()["choices"][0]["message"]["content"])
+                
+                is_pass = ai_data.get("pass", False)
+                rel = ai_data.get("relevance_score", 0)
+                qual = ai_data.get("quality_score", 0)
+                
+                if is_pass and rel >= 7 and qual >= 7:
+                    ai_data["pass"] = True
+                else:
+                    ai_data["pass"] = False
+                    if not ai_data.get("regenerate_reason"):
+                        ai_data["regenerate_reason"] = "Failed relevance or quality score thresholds."
+                return ai_data
+        except Exception as e:
+            print(f"Vision validation error: {e}")
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
             
         return result
 
@@ -225,6 +497,7 @@ class VisualGenerationAgent:
                 draw.text((24, 420 + i * 42), line, font=font, fill=(255, 255, 255))
             return image
 
+<<<<<<< HEAD
     def run(self):
         conn = self._get_conn()
         if not conn:
@@ -360,3 +633,262 @@ if __name__ == "__main__":
     load_dotenv()
     agent = VisualGenerationAgent()
     agent.run()
+=======
+    def generate_visual(self, article):
+        """
+        Input: { id, title, summary, category, emotion, viral_score }
+        Returns: { 'image_path': path, 'visual_concept_json': dict, 'image_status': 'image_ready', 'image_source': 'ai|pexels|template' }
+        """
+        concept = self._get_visual_concept(article)
+        art_id = article.get("id", "0")
+        fname = f"{art_id}_card_{int(time.time())}.png"
+        output_path = os.path.join(self.images_dir, fname)
+        
+        image_source = None
+        image_source_reason = None
+        base_image = None
+        validation_failed = False
+        
+        validation_json = {}
+        
+        # COST TIERS
+        score = int(article.get("viral_score", 0))
+        if score >= 85:
+            sequence = [("ai", "ai_high_score"), ("pexels", "pexels_fallback"), ("template", "template_fallback")]
+        elif score >= 70:
+            sequence = [("pexels", "pexels_mid_score"), ("template", "template_fallback")]
+        else:
+            sequence = [("template", "template_low_score")]
+            
+        for tier, reason in sequence:
+            if tier == "ai":
+                ai_prompt = concept.get("dalle_prompt")
+                if ai_prompt:
+                    ai_prompt += ", no visible faces, silhouettes only, no portrait faces"
+                    try:
+                        base_image = self._generate_ai_image(ai_prompt)
+                        val_res = self._validate_image(base_image, concept, article, is_ai=True)
+                        if not val_res.get("pass"):
+                            validation_failed = True
+                            if val_res.get("use_fallback"):
+                                raise ValueError("AI validation said use fallback")
+                                
+                            regen_reason = val_res.get("regenerate_reason", "")
+                            regen_prompt = ai_prompt + (" - Fix this: " + regen_reason if regen_reason else "")
+                            
+                            base_image = self._generate_ai_image(regen_prompt)
+                            val_res = self._validate_image(base_image, concept, article, is_ai=True)
+                            if not val_res.get("pass"):
+                                raise ValueError("AI validation failed twice")
+                        
+                        validation_json = val_res
+                        image_source = "ai"
+                        image_source_reason = reason
+                        break
+                    except Exception:
+                        base_image = None
+            elif tier == "pexels":
+                pexels_query = concept.get("pexels_fallback")
+                try:
+                    base_image = self._fetch_pexels_photo(pexels_query)
+                    val_res = self._validate_image(base_image, concept, article, is_ai=False)
+                    if not val_res.get("pass"):
+                        raise ValueError("Pexels image failed local validation")
+                    validation_json = val_res
+                    image_source = "pexels"
+                    image_source_reason = reason
+                    break
+                except Exception:
+                    base_image = None
+            elif tier == "template":
+                width, height = 1200, 630
+                primary_hex = self.CATEGORY_COLORS.get((article.get("category") or "").lower(), "#1E3A8A")
+                base_image = Image.new("RGB", (width, height), color=self._hex_to_rgb(primary_hex))
+                val_res = self._validate_image(base_image, concept, article, is_ai=False)
+                validation_json = val_res
+                image_source = "template"
+                image_source_reason = reason
+                break
+            
+        # Composite Overlay
+        is_breaking = any(w in article.get("title", "").lower() for w in ["breaking", "urgent"])
+        final_image = self._overlay_text(
+            base_image,
+            article.get("title", ""),
+            article.get("source", ""),
+            self.config.get("brand_name", "Synthetix News"),
+            self.config.get("tagline", "Real-time updates"),
+            self.config.get("accent_color", "#E53935"),
+            is_breaking,
+            category=article.get("category"),
+            viral_score=article.get("viral_score", 0)
+        )
+        
+        final_image.save(output_path, format="PNG")
+        
+        return {
+            "image_path": output_path,
+            "visual_concept_json": concept,
+            "image_status": "image_ready",
+            "image_source": image_source,
+            "image_source_reason": image_source_reason,
+            "validation_failed": validation_failed,
+            "validation_json": validation_json,
+            "width": final_image.width,
+            "height": final_image.height
+        }
+
+    def _get_conn(self):
+        return psycopg2.connect(self.conn_string)
+
+    def run(self):
+        if not self.conn_string:
+            print("No DATABASE_URL configured.")
+            return {}
+            
+        db_conn = self._get_conn()
+        metrics = {
+            "processed": 0,
+            "ai_generated": 0,
+            "pexels_used": 0,
+            "template_used": 0,
+            "validation_failed": 0,
+            "skipped_cached": 0,
+            "validation_checked": 0,
+            "validation_passed": 0,
+            "validation_regenerated": 0,
+            "validation_fallback": 0,
+            "validation_relevance_sum": 0,
+            "validation_relevance_count": 0
+        }
+        gen_time_total = 0
+        
+        try:
+            with db_conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                # Only process viral_score >= 55
+                cur.execute("""
+                    SELECT * FROM articles 
+                    WHERE status = 'approved_unique' AND viral_score >= 55
+                    LIMIT 20
+                """)
+                articles = cur.fetchall()
+        except Exception as e:
+            print(f"Error fetching for visual generation: {e}")
+            db_conn.rollback()
+            db_conn.close()
+            return metrics
+            
+        for db_art in articles:
+            art_dict = dict(db_art)
+            input_art = {
+                "id": art_dict["id"],
+                "title": art_dict.get("headline", ""),
+                "summary": art_dict.get("full_text", "")[:500] if art_dict.get("full_text") else "",
+                "category": art_dict.get("category", ""),
+                "emotion": art_dict.get("emotion", ""),
+                "viral_score": art_dict.get("viral_score", 0),
+                "source": art_dict.get("source", "")
+            }
+            
+            if art_dict.get("image_path") and os.path.exists(art_dict["image_path"]):
+                metrics["skipped_cached"] += 1
+                continue
+                
+            start_t = time.time()
+            try:
+                res = self.generate_visual(input_art)
+                end_t = time.time()
+                gen_time_total += (end_t - start_t)
+                
+                if res.get("validation_failed"):
+                    metrics["validation_failed"] += 1
+                    metrics["validation_regenerated"] += 1
+                
+                v_json = res.get("validation_json", {})
+                if v_json:
+                    metrics["validation_checked"] += 1
+                    if v_json.get("pass"):
+                        metrics["validation_passed"] += 1
+                    else:
+                        metrics["validation_fallback"] += 1
+                        
+                    rel_score = v_json.get("relevance_score")
+                    if rel_score is not None:
+                        metrics["validation_relevance_sum"] += rel_score
+                        metrics["validation_relevance_count"] += 1
+                
+                source = res["image_source"]
+                if source == "ai": metrics["ai_generated"] += 1
+                elif source == "pexels": metrics["pexels_used"] += 1
+                elif source == "template": metrics["template_used"] += 1
+                
+                metrics["processed"] += 1
+                
+                with db_conn:
+                    with db_conn.cursor() as cur:
+                        cur.execute("""
+                            UPDATE articles
+                            SET image_path = %s,
+                                visual_concept_json = %s,
+                                image_source = %s,
+                                image_source_reason = %s,
+                                image_width = %s,
+                                image_height = %s,
+                                image_validation_json = %s,
+                                image_relevance_score = %s,
+                                image_quality_score = %s,
+                                image_issues = %s,
+                                status = %s
+                            WHERE id = %s
+                        """, (
+                            res["image_path"],
+                            json.dumps(res["visual_concept_json"]),
+                            source,
+                            res["image_source_reason"],
+                            res["width"],
+                            res["height"],
+                            json.dumps(v_json),
+                            v_json.get("relevance_score"),
+                            v_json.get("quality_score"),
+                            json.dumps(v_json.get("issues", [])),
+                            res["image_status"],
+                            art_dict["id"]
+                        ))
+            except Exception as e:
+                print(f"Error processing visual for {art_dict['id']}: {e}")
+                db_conn.rollback()
+                try:
+                    with db_conn:
+                        with db_conn.cursor() as cur:
+                            cur.execute("UPDATE articles SET status = 'image_failed' WHERE id = %s", (art_dict["id"],))
+                except Exception:
+                    db_conn.rollback()
+                
+        db_conn.close()
+        avg_gen_time = round(gen_time_total / max(1, metrics['processed']), 1)
+        print(f"[VISUAL] processed={metrics['processed']}")
+        print(f"[VISUAL] ai_generated={metrics['ai_generated']}")
+        print(f"[VISUAL] pexels_used={metrics['pexels_used']}")
+        print(f"[VISUAL] template_used={metrics['template_used']}")
+        print(f"[VISUAL] skipped_cached={metrics['skipped_cached']}")
+        print(f"[VISUAL] avg_gen_time={avg_gen_time}s")
+        
+        print(f"[VALIDATION] checked={metrics['validation_checked']}")
+        print(f"[VALIDATION] passed={metrics['validation_passed']}")
+        print(f"[VALIDATION] regenerated={metrics['validation_regenerated']}")
+        print(f"[VALIDATION] fallback={metrics['validation_fallback']}")
+        avg_rel = round(metrics["validation_relevance_sum"] / max(1, metrics["validation_relevance_count"]), 1)
+        print(f"[VALIDATION] avg_relevance={avg_rel}")
+        
+        return metrics
+
+if __name__ == "__main__":
+    conn_string = os.getenv("DATABASE_URL", "host=localhost port=5432 dbname=news_system user=postgres")
+    try:
+        conn = psycopg2.connect(conn_string)
+        agent = VisualGenerationAgent()
+        agent.run(conn)
+        conn.close()
+    except Exception as e:
+        print(f"Error executing VisualGenerationAgent: {e}")
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436

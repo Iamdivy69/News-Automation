@@ -313,6 +313,7 @@ def get_health():
             "cloudinary": "disabled"
         }
         
+<<<<<<< HEAD
         # Check PostgreSQL
         try:
             with engine.connect() as conn:
@@ -363,6 +364,21 @@ def get_health():
         return jsonify(health)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+=======
+    # Check Ollama
+    try:
+        # Pinging the root endpoint of Ollama API server
+        ollama_host = os.getenv("OLLAMA_HOST", "localhost:11434")
+        if "://" not in ollama_host:
+            ollama_host = f"http://{ollama_host}"
+        resp = requests.get(ollama_host, timeout=3)
+        if resp.status_code == 200:
+            health["ollama"] = "ok"
+    except Exception:
+        pass
+        
+    return jsonify(health)
+>>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
 
 
 @app.route('/api/pipeline/run', methods=['POST'])
