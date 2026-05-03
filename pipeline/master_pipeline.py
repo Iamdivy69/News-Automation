@@ -1,5 +1,9 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import os
 import psycopg2
+from datetime import datetime, timezone
 from pipeline.stage_runner import run_stage
 
 from agents.news_discovery_agent import NewsDiscoveryAgent
@@ -10,212 +14,47 @@ from agents.summarisation_agent import SummarisationAgent
 from agents.visual_generation_agent import VisualGenerationAgent
 from agents.publishing_agent import PublishingAgent
 
+
 class MasterPipeline:
     def __init__(self):
-        self.conn_string = os.environ.get("DATABASE_URL")
-        
+        self.conn_string = os.environ.get('DATABASE_URL')
+
     def _get_conn(self):
         return psycopg2.connect(self.conn_string)
-<<<<<<< HEAD
-        
-    def _count_articles(self, conn, condition):
-=======
 
-    def run(self) -> dict:
-        from datetime import datetime, timezone
-        started_at = datetime.now(timezone.utc)
-
-        # Phase -1: Purge stale unprocessed articles before running anything else
-        print("Phase -1: Purging stale unprocessed articles older than 12h...")
+    def _count(self, conn, where):
         try:
-            from agents.news_discovery_agent import NewsDiscoveryAgent
-            disc_agent = NewsDiscoveryAgent()
-            purge_conn = self._get_conn()
-            purged = disc_agent.purge_stale_articles(purge_conn)
-            purge_conn.close()
-            print(f"  Purged {purged} stale articles")
-        except Exception as e:
-            print(f"purge_stale error (non-fatal): {e}")
-
-        # 0. Auto-discard stale low-score articles before running the pipeline
-        print("Phase 0: Auto-discarding low-score articles older than 6 hours...")
->>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
-        try:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT COUNT(*) FROM articles WHERE {condition}")
-                return cur.fetchone()[0]
-        except Exception as e:
-<<<<<<< HEAD
-            print(f"Error checking status: {e}")
+            with conn.cursor() as c:
+                c.execute('SELECT COUNT(*) FROM articles WHERE ' + where)
+                return c.fetchone()[0]
+        except Exception:
             conn.rollback()
             return 0
-=======
-            print(f"auto_discard error (non-fatal): {e}")
-        
-        # 1. Run Intelligence Pipeline 
-        # (This automatically executes NewsDiscoveryAgent, ViralScoreEngine, and DuplicateMerger)
-        print("Phase 1: Running Intelligence Pipeline (Discovery, Scoring, Merging)...")
-        intel_pipeline = IntelligencePipeline()
-        intel_summary = intel_pipeline.run()
-        
-        # 2. Run Summarisation Agent
-        # (This fetches 'approved' articles and generates 5 formats via Ollama)
-        print("Phase 2: Running Summarisation Agent...")
-        sum_agent = SummarisationAgent()
-        summarised_count = sum_agent.run()
-        
-        # 3. Run Visual Generation Agent
-        print("Phase 3: Running Visual Generation Agent...")
-        visual_agent = VisualGenerationAgent()
-        os.makedirs(visual_agent.images_dir, exist_ok=True)
-        images_generated_count = 0
-        
-        try:
-            conn = self._get_conn()
-            with conn:
-                with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-                    cur.execute("""
-                        SELECT articles.id, articles.headline, articles.source, articles.category,
-                               articles.is_breaking, articles.viral_score
-                        FROM articles
-                        LEFT JOIN images ON articles.id = images.article_id
-                        WHERE articles.status = 'summarised' AND images.id IS NULL
-                    """)
-                    articles_for_images = cur.fetchall()
-                    
-            for article in articles_for_images:
-                article_id = article["id"]
-                
-                output_path = visual_agent.generate_portrait_card(
-                    headline=article["headline"],
-                    source=article["source"],
-                    category=article["category"],
-                    is_breaking=article["is_breaking"] or False,
-                    article_id=article_id,
-                    viral_score=article["viral_score"] or 0,
-                )
-                
-                if output_path:
-                    with self._get_conn() as save_conn:
-                        visual_agent.save_image_record(
-                            article_id, output_path, 'portrait', save_conn
-                        )
-                    images_generated_count += 1
-                
-            conn.close()
-        except Exception as e:
-            print(f"Error generating visual cards: {e}")
 
-        # Phase 3b: Promoting fully-processed articles to publish_approved
-        print("Phase 3b: Promoting fully-processed articles to publish_approved...")
-        try:
-            promo_conn = self._get_conn()
-            with promo_conn:
-                with promo_conn.cursor() as cur:
-                    cur.execute('''
-                        UPDATE articles
-                        SET status = %s
-                        WHERE status = %s
-                        AND id IN (SELECT article_id FROM summaries)
-                        AND id IN (SELECT article_id FROM images)
-                    ''', ('publish_approved', 'approved'))
-                    promoted = cur.rowcount
-            promo_conn.close()
-            print(f"  Promoted {promoted} articles to publish_approved")
-            combined_summary["promoted"] = promoted
-        except Exception as e:
-            print(f"Phase 3b error (non-fatal): {e}")
-
-        # 4. Run Publishing Agent
-        print("Phase 4: Running Publishing Agent...")
-        pub_agent = PublishingAgent()
-        published_count = pub_agent.run(limit=50)
-
-        # 4. Compile Master Summary
-        total_discovered = intel_summary.get("discovered", 0)
-        total_scored = intel_summary.get("scored", 0)
-        total_merged = intel_summary.get("merged", 0)
-        total_breaking = intel_summary.get("breaking", 0)
-        
-        combined_summary = {
-            "discovered": total_discovered,
-            "scored": total_scored,
-            "merged": total_merged,
-            "breaking": total_breaking,
-            "summarised": summarised_count,
-            "images_generated": images_generated_count,
-            "published": published_count
-        }
-        
-        print("Phase 5: Running Feedback Loop Engine...")
-        try:
-            from agents.feedback_loop_engine import FeedbackLoopEngine
-            feedback = FeedbackLoopEngine()
-            fb_result = feedback.run()
-            combined_summary["insight"] = fb_result.get("insight_report", "")[:200]
-            print(f"  Insight: {combined_summary['insight']}")
-        except Exception as e:
-            print(f"Feedback loop error: {e}")
-            combined_summary["insight"] = ""
-        
-        finished_at = datetime.now(timezone.utc)
-        duration_sec = (finished_at - started_at).total_seconds()
-        
-        try:
-            conn = self._get_conn()
-            with conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        """
-                        INSERT INTO pipeline_runs 
-                        (run_type, discovered, scored, merged, breaking, summarised, images_generated, published, duration_sec, started_at, finished_at) 
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """,
-                        (
-                            'master_pipeline',
-                            total_discovered,
-                            total_scored,
-                            total_merged,
-                            total_breaking,
-                            summarised_count,
-                            images_generated_count,
-                            published_count,
-                            duration_sec,
-                            started_at,
-                            finished_at
-                        )
-                    )
-            conn.close()
-        except Exception as e:
-            print(f"Failed to log master pipeline summary to database: {e}")
->>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
-            
     def run(self):
+        started = datetime.now(timezone.utc)
         conn = self._get_conn()
-        
-        stages = [
-            ("Stage 1", "discovery", NewsDiscoveryAgent, None),
-            ("Stage 2", "viral_scoring", ViralScoreEngine, "status = 'approved'"),
-            ("Stage 3", "duplicate_merging", DuplicateMerger, "status = 'ranked'"),
-            ("Stage 4", "top30_selection", Top30Selector, "status = 'approved_unique'"),
-            ("Stage 5", "summarisation", SummarisationAgent, "status = 'top30_selected' AND top_30_selected = TRUE"),
-            ("Stage 6", "visual_generation", VisualGenerationAgent, "status = 'summarised' AND top_30_selected = TRUE"),
-            ("Stage 7", "publishing", PublishingAgent, "status IN ('image_ready', 'queued')")
+
+        STAGES = [
+            ('Stage 1', 'discovery',         NewsDiscoveryAgent,   None),
+            ('Stage 2', 'viral_scoring',      ViralScoreEngine,     "status='approved'"),
+            ('Stage 3', 'deduplication',      DuplicateMerger,      "status='ranked'"),
+            ('Stage 4', 'top30_selection',    Top30Selector,        "status='approved_unique'"),
+            ('Stage 5', 'summarisation',      SummarisationAgent,   "status='top30_selected' AND top_30_selected=TRUE"),
+            ('Stage 6', 'visual_generation',  VisualGenerationAgent,"status='summarised' AND top_30_selected=TRUE"),
+            ('Stage 7', 'publishing',         PublishingAgent,      "status='image_ready'"),
         ]
-        
+
         summary = {}
-        
-        for display_name, stage_name, agent_class, condition in stages:
-            if condition:
-                count = self._count_articles(conn, condition)
-                if count == 0:
-                    print(f"[PIPELINE] {display_name}: {stage_name} skipped (0 articles waiting in required status)")
-                    summary[stage_name] = {"status": "skipped", "reason": "no input"}
-                    continue
-            
-            # Run the stage
-            res = run_stage(stage_name, agent_class, conn)
-            summary[stage_name] = res
-            
+
+        for disp, name, Cls, cond in STAGES:
+            if cond and self._count(conn, cond) == 0:
+                print(f'[PIPELINE] {disp} ({name}): SKIPPED')
+                summary[name] = {'status': 'skipped'}
+                continue
+
+            print(f'[PIPELINE] {disp} ({name}): RUNNING')
+            summary[name] = run_stage(name, Cls, conn)
+
         conn.close()
         return summary

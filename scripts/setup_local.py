@@ -33,17 +33,17 @@ def main():
         print("  Is Docker running?  ->  docker compose up -d")
         sys.exit(1)
 
-    # Step 2: Apply base schema
+    # Step 2: Apply full unified schema
     print("\n  Applying base schema (database/db_schema.py)...")
     try:
-        from database.db_schema import create_tables
+        from database.db_schema import create_tables, verify_tables
         create_tables(db_url)
         print("  [OK] Base schema applied")
     except Exception as e:
         print(f"  [ERR] Base schema error: {e}")
         sys.exit(1)
 
-    # Step 3: Apply v2 migration
+    # Step 3: Apply v2 migration (safe to skip if file missing)
     migration_path = os.path.join(
         os.path.dirname(__file__), '..', 'database', 'migrations', 'v2_upgrade.sql'
     )
@@ -63,10 +63,45 @@ def main():
     except FileNotFoundError:
         print(f"  [WARN] Migration file not found: {migration_path} -- skipping")
     except Exception as e:
-        print(f"  [ERR] Migration error: {e}")
+        print(f"  [WARN] Migration error (non-fatal, columns may already exist): {e}")
+
+    # Step 4: Verify all expected tables exist
+    print("\n  Verifying all required tables...")
+    try:
+        missing = verify_tables(db_url)
+        if missing:
+            print(f"  [ERR] Missing tables after setup: {missing}")
+            sys.exit(1)
+        else:
+            print("  [OK] All tables verified")
+    except Exception as e:
+        print(f"  [ERR] Table verification failed: {e}")
         sys.exit(1)
 
-    print("\n[OK] Database ready. You can now run:\n  python -m pytest tests/ -v\n")
+    # Step 5: Seed feed sources if empty
+    print("\n  Checking feed_sources seed data...")
+    seed_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'seed_feeds.sql')
+    try:
+        conn = psycopg2.connect(db_url)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM feed_sources")
+                count = cur.fetchone()[0]
+            if count == 0 and os.path.exists(seed_path):
+                with open(seed_path, 'r') as f:
+                    seed_sql = f.read()
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(seed_sql)
+                print("  [OK] feed_sources seeded")
+            else:
+                print(f"  [OK] feed_sources already has {count} rows — skipping seed")
+        finally:
+            conn.close()
+    except Exception as e:
+        print(f"  [WARN] feed_sources seed skipped: {e}")
+
+    print("\n[OK] Database ready -- all tables verified\n")
 
 
 if __name__ == "__main__":

@@ -28,12 +28,8 @@ def _run_pipeline_background():
 load_dotenv()
 
 app = Flask(__name__)
-# Allow requests from React dev server on both Vite (5173) and CRA (3000)
-CORS(app, origins=[
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:5173",
-])
+# Allow requests from any origin (dev + production)
+CORS(app, origins='*')
 
 db_url = os.environ.get("DATABASE_URL")
 if not db_url:
@@ -81,36 +77,45 @@ def get_articles():
     status = request.args.get('status', 'summarised')
     category = request.args.get('category')
     search = request.args.get('search')
-    
+
     offset = (page - 1) * per_page
-    
-    query = """
-        SELECT id, headline, source, category, viral_score, is_breaking, status, created_at
-        FROM articles
-        WHERE status = :status
-    """
-    params = {"status": status}
-    
+    params = {}
+
+    # status='any' or '' returns all articles regardless of status
+    if status and status != 'any':
+        query = """
+            SELECT id, headline, source, category, viral_score, is_breaking, status, created_at
+            FROM articles
+            WHERE status = :status
+        """
+        params["status"] = status
+    else:
+        query = """
+            SELECT id, headline, source, category, viral_score, is_breaking, status, created_at
+            FROM articles
+            WHERE 1=1
+        """
+
     if category:
         query += " AND category = :category"
         params["category"] = category
-        
+
     if search:
         query += " AND headline ILIKE :search"
         params["search"] = f"%{search}%"
-        
+
     query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
     params.update({"limit": per_page, "offset": offset})
-    
+
     with engine.connect() as conn:
         result = conn.execute(text(query), params)
         articles = [dict(row) for row in result.mappings()]
-        
+
         # Format datetime for JSON serialization
         for a in articles:
             if a.get('created_at'):
                 a['created_at'] = a['created_at'].isoformat()
-        
+
         return jsonify(articles)
 
 
@@ -313,7 +318,6 @@ def get_health():
             "cloudinary": "disabled"
         }
         
-<<<<<<< HEAD
         # Check PostgreSQL
         try:
             with engine.connect() as conn:
@@ -364,21 +368,6 @@ def get_health():
         return jsonify(health)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-=======
-    # Check Ollama
-    try:
-        # Pinging the root endpoint of Ollama API server
-        ollama_host = os.getenv("OLLAMA_HOST", "localhost:11434")
-        if "://" not in ollama_host:
-            ollama_host = f"http://{ollama_host}"
-        resp = requests.get(ollama_host, timeout=3)
-        if resp.status_code == 200:
-            health["ollama"] = "ok"
-    except Exception:
-        pass
-        
-    return jsonify(health)
->>>>>>> fd315f50abf38353da795d9f1ab9eb3bd318e436
 
 
 @app.route('/api/pipeline/run', methods=['POST'])
@@ -398,33 +387,36 @@ def run_pipeline_api():
 def get_pipeline_status():
     try:
         query = """
-            SELECT id, run_type, discovered, scored, merged, breaking, 
-                   summarised, images_generated, duration_sec, 
+            SELECT id, run_type, discovered, scored, merged, breaking,
+                   summarised, images_generated, duration_sec,
                    started_at, finished_at
             FROM pipeline_runs
             ORDER BY started_at DESC
             LIMIT 1
         """
-        with engine.connect() as conn:
-            result = conn.execute(text(query)).mappings().fetchone()
-            
+        try:
+            with engine.connect() as conn:
+                result = conn.execute(text(query)).mappings().fetchone()
+
+                last_run = None
+                if result:
+                    row = dict(result)
+                    if row.get('started_at'):
+                        row['started_at'] = row['started_at'].isoformat()
+                    if row.get('finished_at'):
+                        row['finished_at'] = row['finished_at'].isoformat()
+                    last_run = row
+        except Exception:
+            # pipeline_runs empty or schema mismatch — return safe default
             last_run = None
-            if result:
-                row = dict(result)
-                # Serialize datetime objects securely for JSON
-                if row.get('started_at'):
-                    row['started_at'] = row['started_at'].isoformat()
-                if row.get('finished_at'):
-                    row['finished_at'] = row['finished_at'].isoformat()
-                last_run = row
-                
+
         return jsonify({
             "is_running": pipeline_running.is_set(),
             "last_run": last_run
         }), 200
-        
+
     except Exception as e:
-        return jsonify({"error": "Failed to fetch pipeline status", "details": str(e)}), 500
+        return jsonify({"is_running": False, "last_run": None}), 200
 
 
 @app.route('/api/posts/pending', methods=['GET'])
@@ -684,11 +676,12 @@ def get_pipeline_stages():
         """
         with engine.connect() as conn:
             result = conn.execute(text(query)).mappings().fetchall()
-            
+
         stages = {
-            "raw": 0, "approved": 0, "ranked": 0, "approved_unique": 0,
-            "top30_selected": 0, "discarded": 0, "summarised": 0,
-            "image_ready": 0, "published": 0, "failed": 0
+            "raw": 0, "new": 0, "approved": 0, "ranked": 0,
+            "approved_unique": 0, "top30_selected": 0, "discarded": 0,
+            "summarised": 0, "image_ready": 0, "image_failed": 0,
+            "published": 0, "failed": 0
         }
         for row in result:
             s = row['status']
@@ -835,7 +828,7 @@ def discard_article(article_id):
 def get_pipeline_logs():
     try:
         query = """
-            SELECT stage, started_at, completed_at, articles_in, articles_out, error_message as errors
+            SELECT stage, started_at, completed_at, articles_in, articles_out, notes as errors
             FROM pipeline_runs
             ORDER BY started_at DESC
             LIMIT 50

@@ -10,7 +10,8 @@ def run_stage(stage_name, agent_class, log_conn) -> dict:
     
     try:
         agent = agent_class()
-        metrics = agent.run() or {}
+        raw = agent.run()
+        metrics = raw if isinstance(raw, dict) else {'processed': raw or 0}
     except Exception as e:
         status = "failed"
         error_msg = str(e)
@@ -34,8 +35,8 @@ def run_stage(stage_name, agent_class, log_conn) -> dict:
     try:
         with log_conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO pipeline_runs 
-                (stage, started_at, completed_at, articles_in, articles_out, error_message)
+                INSERT INTO pipeline_runs
+                (stage, started_at, completed_at, articles_in, articles_out, notes)
                 VALUES (%s, %s, %s, %s, %s, %s)
             """, (
                 stage_name,
