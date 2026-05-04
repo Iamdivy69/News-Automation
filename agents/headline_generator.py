@@ -52,15 +52,28 @@ Is Breaking: {is_breaking}
 """
 
         system_prompt = """
-You are a senior news headline writer for a visual social media brand.
-Generate a VISUAL HEADLINE from the article below.
-STRICT RULES:- headline: MAX 8 WORDS, ALL UPPERCASE, punchy and factual- highlight_words: Pick 1-2 words that carry the most emotional weight. Must exist in the headline.- subtext: One plain-case sentence (max 15 words) explaining the story- tag: exactly one of: breaking | sports | finance | politics | technology | world
-OUTPUT ONLY valid JSON, no markdown, no explanation:
+You are a tabloid headline writer for BOLD visual social media news cards.
+Your headlines will be rendered in GIANT TYPE on a 1080x1080 image.
+STRICT OUTPUT RULES:
+1. headline: EXACTLY 4-6 WORDS. ALL CAPS. NO MORE.
+Good: "9 KILLED IN DELHI BLAZE"
+Good: "TRUMP BYPASSES CONGRESS ON WAR"
+Bad: "GRETCHEN WALSH SETS 100M BUTTERFLY WORLD RECORD FOR THIRD TIME" (too long)
+2. highlight_words: EXACTLY 2 words from the headline that carry maximum emotional impact.
+These will be printed in RED. Choose action/impact words, not names.
+Good: ["KILLED", "BLAZE"]
+Good: ["BYPASSES", "WAR"]
+Bad: ["GRETCHEN", "WALSH"] (names are weak highlights)
+3. subtext: One sentence. Max 12 words. Plain case. Must add context not in headline.
+Good: "Tragedy strikes Delhi building; child among nine victims."
+Bad: "Gretchen Walsh breaks her own 100m butterfly world record for the third time." (too long)
+4. tag: ONE of: breaking | sports | finance | politics | technology | world | india
+OUTPUT: Valid JSON only. No markdown. No explanation. No extra text.
 {
-"headline": "...",
-"highlight_words": ["..."],
-"subtext": "...",
-"tag": "..."
+"headline": "EXACTLY 4-6 WORDS ALL CAPS",
+"highlight_words": ["WORD1", "WORD2"],
+"subtext": "One sentence max 12 words.",
+"tag": "breaking"
 }
 """
         
@@ -113,14 +126,32 @@ OUTPUT ONLY valid JSON, no markdown, no explanation:
                 if not isinstance(data["highlight_words"], list):
                     raise ValueError("highlight_words must be a list")
                 
-                headline_upper = str(data["headline"]).upper()
-                for hw in data["highlight_words"]:
-                    if str(hw).upper() not in headline_upper:
-                        raise ValueError(f"highlight_word '{hw}' not found in headline")
+                # Enforce 6-word max on headline
+                words = data['headline'].split()
+                if len(words) > 6:
+                    # Keep most impactful 6 words (drop filler words)
+                    FILLERS = {'THE', 'A', 'AN', 'FOR', 'OF', 'IN', 'ON', 'AT', 'TO', 'AND', 'AS', 'IS', 'ARE', 'BY'}
+                    core_words = [w for w in words if w.upper() not in FILLERS]
+                    if len(core_words) >= 4:
+                        data['headline'] = ' '.join(core_words[:6])
+                    else:
+                        data['headline'] = ' '.join(words[:6])
                 
-                # Force uppercase on headline just in case
-                data["headline"] = headline_upper
-                
+                # Enforce highlight_words exist in headline
+                headline_words = set(data['headline'].upper().split())
+                data['highlight_words'] = [
+                    w for w in data['highlight_words']
+                    if w.upper() in headline_words
+                ]
+                if not data['highlight_words'] and data['headline'].split():
+                    # Auto-pick: first non-filler word
+                    FILLERS = {'THE', 'A', 'AN', 'FOR', 'OF', 'IN', 'ON', 'AT', 'TO', 'AND'}
+                    for w in data['headline'].split():
+                        if w.upper() not in FILLERS:
+                            data['highlight_words'] = [w]
+                            break
+                            
+                data['headline'] = data['headline'].upper()
                 return data
 
             except Exception as e:

@@ -16,20 +16,29 @@ import {
   fetchPipelineLogs,
   fetchPipelineStatus,
   runPipeline,
+  runStage,
   relativeTime,
   formatDurationSec,
 } from '@/lib/api';
 
 // ── Stage definitions ─────────────────────────────────────────────────────────
-const STAGE_DEFS = [
-  { name: 'Discovery',    key: 'raw',            desc: 'Fresh articles' },
-  { name: 'Viral Score',  key: 'approved',       desc: 'Scored queue' },
-  { name: 'Dedup',        key: 'ranked',         desc: 'Unique ranked' },
-  { name: 'Top-30 Gate',  key: 'approved_unique',desc: 'Cost gate', isCostGate: true },
-  { name: 'Summarise',    key: 'top30_selected', desc: 'Caption gen' },
-  { name: 'Image Gen',    key: 'summarised',     desc: 'Render queue' },
-  { name: 'Publish',      key: 'image_ready',    desc: 'Ready to post' },
-] as const;
+type StageDef = {
+  name: string;
+  key: string;
+  stageName: string;
+  desc: string;
+  isCostGate?: boolean;
+};
+
+const STAGE_DEFS: StageDef[] = [
+  { name: 'Discovery',    key: 'raw',            stageName: 'discovery',         desc: 'Fresh articles' },
+  { name: 'Viral Score',  key: 'approved',       stageName: 'viral_scoring',     desc: 'Scored queue' },
+  { name: 'Dedup',        key: 'ranked',         stageName: 'deduplication',     desc: 'Unique ranked' },
+  { name: 'Top-30 Gate',  key: 'approved_unique',stageName: 'top30_selection',   desc: 'Cost gate', isCostGate: true },
+  { name: 'Summarise',    key: 'top30_selected', stageName: 'summarisation',     desc: 'Caption gen' },
+  { name: 'Image Gen',    key: 'summarised',     stageName: 'visual_generation', desc: 'Render queue' },
+  { name: 'Publish',      key: 'image_ready',    stageName: 'publishing',        desc: 'Ready to post' },
+];
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function secondsSince(date: Date) {
@@ -37,10 +46,10 @@ function secondsSince(date: Date) {
 }
 
 function StageCard({
-  name, count, isCostGate, isRunning, desc,
+  name, count, isCostGate, isRunning, desc, stageName, onRun
 }: {
   name: string; count: number; isCostGate?: boolean;
-  isRunning: boolean; desc: string;
+  isRunning: boolean; desc: string; stageName: string; onRun: (stageName: string) => void;
 }) {
   return (
     <Card
@@ -68,7 +77,7 @@ function StageCard({
         </CardTitle>
         <p className="text-[10px] text-muted-foreground/70 mt-0.5">{desc}</p>
       </CardHeader>
-      <CardContent className="p-3 pt-1">
+      <CardContent className="p-3 pt-1 pb-2">
         <div
           className={`text-4xl font-black tabular-nums transition-colors duration-300 ${
             count > 0 ? 'text-green-500' : 'text-muted-foreground/25'
@@ -76,6 +85,12 @@ function StageCard({
         >
           {count}
         </div>
+        <button
+          onClick={() => onRun(stageName)}
+          className='w-full mt-2 text-[9px] text-muted-foreground hover:text-primary transition-colors'
+        >
+          Run
+        </button>
       </CardContent>
     </Card>
   );
@@ -120,7 +135,6 @@ export default function Index() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  // ── Run pipeline ──────────────────────────────────────────────────────────
   const handleRun = async () => {
     setTriggering(true);
     try {
@@ -136,6 +150,15 @@ export default function Index() {
     } finally {
       setTriggering(false);
     }
+  };
+
+  const handleRunStage = async (stageName: string) => {
+    toast.info(`Running ${stageName}...`);
+    try {
+      await runStage(stageName);
+      toast.success(`${stageName} started`);
+      setTimeout(fetchData, 3000); // refresh counts after 3s
+    } catch { toast.error(`Failed to start ${stageName}`); }
   };
 
   const isRunning = pipelineStatus?.is_running;
@@ -193,6 +216,8 @@ export default function Index() {
               isCostGate={stage.isCostGate}
               isRunning={!!isRunning}
               desc={stage.desc}
+              stageName={stage.stageName}
+              onRun={handleRunStage}
             />
             {idx < STAGE_DEFS.length - 1 && (
               <div className="flex items-center flex-shrink-0 text-muted-foreground/40">

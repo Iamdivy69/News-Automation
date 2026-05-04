@@ -101,6 +101,10 @@ def main():
     except Exception as e:
         print(f"  [WARN] feed_sources seed skipped: {e}")
 
+    print("\nInstalling image generation fonts...")
+    os.system('python scripts/install_fonts.py')
+    print(" Fonts installed")
+
     print("\n[OK] Database ready -- all tables verified\n")
 
 

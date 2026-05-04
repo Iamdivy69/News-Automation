@@ -137,7 +137,7 @@ function ArticleCard({
     setRegenLoading(true);
     try {
       const result = await regenerateImage(article.id);
-      onUpdate(article.id, { image_url: result.image_url });
+      onUpdate(article.id, { image_url: result.image_url || `/api/articles/${article.id}/image` });
       toast.success('Image regenerated');
     } catch {
       toast.error('Image regeneration failed');
@@ -173,6 +173,12 @@ function ArticleCard({
     }
   };
 
+  const imageUrl = article.image_url
+    ? (article.image_url.startsWith('/api') || article.image_url.startsWith('http')
+      ? article.image_url
+      : `/api/articles/${article.id}/image`)
+    : null;
+
   return (
     <Card
       className={`overflow-hidden transition-all duration-400 shadow-sm hover:shadow-md ${
@@ -186,17 +192,24 @@ function ArticleCard({
             <Loader2 className="w-8 h-8 animate-spin text-primary" />
           </div>
         )}
-        {article.image_url ? (
+        {imageUrl ? (
           <img
-            src={article.image_url}
+            src={imageUrl}
             alt={article.headline}
             className="w-full h-full object-cover"
-            onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
+            onError={e => {
+              const t = e.target as HTMLImageElement;
+              if (!t.src.includes('/api/articles/')) {
+                t.src = `/api/articles/${article.id}/image`;
+              } else {
+                t.style.display = 'none';
+              }
+            }}
           />
         ) : (
-          <div className="w-full h-full flex flex-col items-center justify-center text-muted-foreground/40 gap-2">
-            <ImageIcon className="w-10 h-10" />
-            <span className="text-xs">No image yet</span>
+          <div className="w-full h-full flex flex-col items-center justify-center gap-2 text-muted-foreground">
+            <ImageIcon className="w-10 h-10 opacity-30" />
+            <span className="text-xs">No image yet — click Regen</span>
           </div>
         )}
         {/* Viral score badge */}

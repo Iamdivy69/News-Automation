@@ -57,18 +57,33 @@ class VisualGenerationAgent:
                 rdata = {**dict(art), **hdata}
                 self.renderer.render(rdata, path)
 
+                # Step A: Write to images table
+                try:
+                    with conn.cursor() as c:
+                        c.execute("""
+                            INSERT INTO images (article_id, image_path, image_type)
+                            VALUES (%s, %s, 'portrait')
+                            ON CONFLICT DO NOTHING
+                        """, (art['id'], path))
+                except Exception as e:
+                    print(f'[VISUAL] images table write failed: {e}')
+                    # Non-fatal — continue anyway
+
+                # Step B: Store HTTP URL in articles.image_url
+                api_image_url = f"/api/articles/{art['id']}/image"
                 with conn.cursor() as c:
                     c.execute("""
                         UPDATE articles
-                        SET image_url       = %s,
-                            image_source    = 'gemini_template',
-                            image_prompt    = %s,
-                            status          = 'image_ready',
+                        SET image_url = %s,
+                            image_source = 'gemini_template',
+                            image_prompt = %s,
+                            status = 'image_ready',
                             processing_stage = 'image_ready'
                         WHERE id = %s
-                    """, (path, hdata.get('headline', ''), art['id']))
+                    """, (api_image_url, hdata.get('headline', ''), art['id']))
                 conn.commit()
                 metrics['success'] += 1
+                print(f"[VISUAL] article={art['id']} image={path} url={api_image_url}")
 
             except Exception as e:
                 conn.rollback()

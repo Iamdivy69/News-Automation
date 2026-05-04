@@ -76,11 +76,17 @@ export const fetchPipelineStages = () => apiFetch('/pipeline/stages');
 
 export const fetchPipelineLogs = async () => {
   try {
-    return await apiFetch('/pipeline/logs');
+    const res = await apiFetch('/pipeline/logs');
+    if (res && Array.isArray(res)) return res;
+    if (res && Array.isArray(res.pipeline_runs)) return res.pipeline_runs;
+    return [];
   } catch {
     return [];
   }
 };
+
+export const runStage = (stageName: string) =>
+  fetch(`/api/pipeline/run-stage/${stageName}`, { method: 'POST' }).then(r => r.json());
 
 export const runPipeline = async () => {
   const res = await fetch(`${BASE}/pipeline/run`, { method: "POST" });

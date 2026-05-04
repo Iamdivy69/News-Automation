@@ -6,218 +6,273 @@ from PIL import Image, ImageDraw, ImageFont
 class ImageRenderer:
     def __init__(self):
         self.width = 1080
-        self.height = 1350
-        self.bg_color = "#FFFFFF"
-        self.font_path = "assets/fonts/PlayfairDisplay-Bold.ttf"
-        self._ensure_font()
+        self.height = 1080 # CHANGED: square canvas like reference
+        self.bg_color = "#FAFAF8" # CHANGED: very slight warm white, not pure white
+        # Font paths in priority order
+        self.project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        font_dir = os.path.join(self.project_root, 'assets', 'fonts')
+        os.makedirs(font_dir, exist_ok=True)
+        self.font_headline = os.path.join(font_dir, 'PlayfairDisplay-Bold.ttf')
+        self.font_subtext = os.path.join(font_dir, 'OpenSans-Bold.ttf')
+        self._ensure_fonts(font_dir)
 
-    def _ensure_font(self):
-        os.makedirs(os.path.dirname(self.font_path), exist_ok=True)
-        if not os.path.exists(self.font_path):
-            # Multiple fallback URLs for Playfair Display Bold
-            font_urls = [
-                "https://fonts.gstatic.com/s/playfairdisplay/v30/nuFvD-vYSZviVYUb_rj3ij__anPXJzDwcbmjWBN2PKdFvXDXbtXK-F2qC0s.ttf",
-                "https://github.com/googlefonts/playfair/raw/main/fonts/ttf/PlayfairDisplay-Bold.ttf",
-            ]
-            for url in font_urls:
-                try:
-                    resp = requests.get(url, timeout=30)
-                    resp.raise_for_status()
-                    with open(self.font_path, "wb") as f:
-                        f.write(resp.content)
-                    print(f"[FONT] Downloaded from {url}")
+    def _ensure_fonts(self, font_dir):
+        '''Download fonts from working CDN sources. Never crash if download fails.'''
+        fonts_needed = [
+            # (local_path, working_download_urls_list)
+            (self.font_headline, [
+                'C:/Windows/Fonts/georgiab.ttf', # local copy first for Windows
+                'C:/Windows/Fonts/timesbd.ttf',
+                'https://github.com/clauseggers/playfair/raw/master/fonts/ttf/PlayfairDisplay-Bold.ttf',
+                'https://noto-website-2.storage.googleapis.com/pkgs/Playfair_Display.zip', # skip if fails
+            ]),
+            (self.font_subtext, [
+                '/usr/share/fonts/truetype/open-sans/OpenSans-Bold.ttf', # local copy first
+                'C:/Windows/Fonts/arialbd.ttf', # local copy first for Windows
+                'https://fonts.gstatic.com/s/opensans/v40/memSYaGs126MiZpBA-UvWbX2vVnXBbObj2OVZyOOSr4dVJWUgsjZ0B4gaVc.ttf',
+            ]),
+        ]
+        for local_path, sources in fonts_needed:
+            if os.path.exists(local_path) and os.path.getsize(local_path) > 30000:
+                continue # valid font already exists
+            for src in sources:
+                if not src.startswith('http') and os.path.exists(src):
+                    # local system font — just copy it
+                    import shutil
+                    shutil.copy2(src, local_path)
+                    print(f'[FONT] Copied from system: {src}')
                     break
-                except Exception as e:
-                    print(f"[FONT] Failed URL {url}: {e}")
+                if src.startswith('http'):
+                    try:
+                        import requests
+                        r = requests.get(src, timeout=20, headers={'User-Agent': 'Mozilla/5.0'})
+                        if r.status_code == 200 and len(r.content) > 30000:
+                            with open(local_path, 'wb') as f:
+                                f.write(r.content)
+                            print(f'[FONT] Downloaded: {os.path.basename(local_path)} ({len(r.content)} bytes)')
+                            break
+                    except Exception as e:
+                        print(f'[FONT] Failed {src}: {e}')
 
-
-    def _get_font(self, size):
+    def _get_font(self, size, bold=True):
+        '''Get font with full fallback chain. Never returns a bitmap font silently.'''
+        # Priority: project fonts → system serif → system sans → PIL default
+        candidates = [
+            self.font_headline if bold else self.font_subtext,
+            '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf',
+            '/usr/share/fonts/truetype/freefont/FreeSerifBold.ttf',
+            '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf',
+            'C:/Windows/Fonts/georgiab.ttf',
+            'C:/Windows/Fonts/timesbd.ttf',
+            '/usr/share/fonts/truetype/open-sans/OpenSans-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+            'C:/Windows/Fonts/arialbd.ttf',
+        ]
+        for path in candidates:
+            if path and os.path.exists(path) and os.path.getsize(path) > 10000:
+                try:
+                    return ImageFont.truetype(path, size)
+                except Exception:
+                    continue
+        # Last resort: PIL default at approximate size
+        print(f'[FONT] WARNING: Using PIL default font at size {size}')
         try:
-            return ImageFont.truetype(self.font_path, size)
-        except Exception:
-            try:
-                return ImageFont.load_default(size=size)
-            except TypeError:
-                return ImageFont.load_default()
+            return ImageFont.load_default(size=size)
+        except TypeError:
+            return ImageFont.load_default()
 
     def render(self, data: dict, output_path: str) -> str:
-        img = Image.new("RGB", (self.width, self.height), self.bg_color)
+        from PIL import Image, ImageDraw, ImageFont
+        import textwrap, os
+        from datetime import datetime
+
+        # Canvas
+        img = Image.new('RGB', (self.width, self.height), self.bg_color)
         draw = ImageDraw.Draw(img)
+        W, H = self.width, self.height
 
-        headline = data.get("headline", "").upper()
-        highlight_words = [w.upper() for w in data.get("highlight_words", [])]
-        subtext = data.get("subtext", "")
-        tag = data.get("tag", "default").lower()
-        
-        # Color Routing
-        tag_colors = {
-            "sports": "#CC0000",
-            "finance": "#B8860B",
-            "politics": "#003366",
-            "breaking": "#CC0000",
-            "default": "#CC0000"
+        headline = str(data.get('headline', '')).upper().strip()
+        highlight_words = [str(w).upper().strip() for w in data.get('highlight_words', [])]
+        subtext = str(data.get('subtext', '')).strip()
+        tag = str(data.get('tag', 'world')).lower().strip()
+
+        TAG_COLORS = {
+            'breaking': '#CC0000',
+            'sports': '#CC0000',
+            'finance': '#B8860B',
+            'politics': '#003366',
+            'technology': '#0066CC',
+            'world': '#CC0000',
+            'india': '#CC6600',
         }
-        accent_color = tag_colors.get(tag, tag_colors["default"])
+        accent = TAG_COLORS.get(tag, '#CC0000')
 
-        # 1. TOP BAR (50px black)
-        draw.rectangle([0, 0, self.width, 50], fill="#000000")
-        
-        bar_font = self._get_font(24)
-        date_str = datetime.now().strftime("%B %d, %Y").upper()
-        draw.text((20, 10), date_str, font=bar_font, fill="#FFFFFF")
-        
-        tag_str = tag.upper()
-        center_text = f"{tag_str} EDITION"
-        bbox = draw.textbbox((0, 0), center_text, font=bar_font)
-        cw = bbox[2] - bbox[0]
-        draw.text(((self.width - cw) // 2, 10), center_text, font=bar_font, fill=accent_color)
-        
-        cat_str = data.get("category", tag).upper()
-        c_bbox = draw.textbbox((0, 0), cat_str, font=bar_font)
-        ccw = c_bbox[2] - c_bbox[0]
-        draw.text((self.width - ccw - 20, 10), cat_str, font=bar_font, fill="#FFFFFF")
+        # 1. AUTO-SIZE HEADLINE
+        # Start at 180px, shrink until all words fit in max 3 lines within 900px wide
+        MAX_W = 900
+        MAX_LINES = 3
+        font_size = 180
+        h_font = None
+        h_lines = []
 
-        # Breaking Banner Strip
-        y_offset = 50
-        if tag == "breaking":
-            draw.rectangle([0, y_offset, self.width, y_offset + 40], fill="#CC0000")
-            b_font = self._get_font(28)
-            b_text = "BREAKING NEWS"
-            b_bbox = draw.textbbox((0,0), b_text, font=b_font)
-            bw = b_bbox[2] - b_bbox[0]
-            draw.text(((self.width - bw) // 2, y_offset + 5), b_text, font=b_font, fill="#FFFFFF")
-            y_offset += 40
-
-        # 2. HEADLINE ZONE
-        y_offset += 80
-        font_size = 90
-        max_w = 1000
-        
-        # Word wrap logic with font scaling
-        lines = []
-        while font_size > 20:
-            h_font = self._get_font(font_size)
+        while font_size >= 60:
+            h_font = self._get_font(font_size, bold=True)
             words = headline.split()
             lines = []
-            curr_line = []
-            
-            for word in words:
-                curr_line.append(word)
-                test_line = " ".join(curr_line)
-                bbox = draw.textbbox((0, 0), test_line, font=h_font)
-                if (bbox[2] - bbox[0]) > max_w:
-                    curr_line.pop()
-                    if curr_line:
-                        lines.append(" ".join(curr_line))
-                    curr_line = [word]
-            if curr_line:
-                lines.append(" ".join(curr_line))
+            cur = []
+            for w in words:
+                cur.append(w)
+                bb = draw.textbbox((0,0), ' '.join(cur), font=h_font)
+                if (bb[2] - bb[0]) > MAX_W:
+                    cur.pop()
+                    if cur:
+                        lines.append(' '.join(cur))
+                    cur = [w]
+            if cur:
+                lines.append(' '.join(cur))
                 
-            if len(lines) <= 3:
-                too_wide = False
-                for line in lines:
-                    bbox = draw.textbbox((0,0), line, font=h_font)
-                    if (bbox[2] - bbox[0]) > max_w:
-                        too_wide = True
-                        break
-                if not too_wide:
-                    break
-                    
-            font_size -= 5
-
-        # Draw headline lines
-        h_font = self._get_font(font_size)
-        for line in lines:
-            bbox = draw.textbbox((0, 0), line, font=h_font)
-            lw = bbox[2] - bbox[0]
-            lh = bbox[3] - bbox[1]
-            x_start = (self.width - lw) // 2
+            fits = len(lines) <= MAX_LINES and all(
+                (draw.textbbox((0,0), l, font=h_font)[2] - draw.textbbox((0,0), l, font=h_font)[0]) <= MAX_W
+                for l in lines
+            )
+            if fits:
+                h_lines = lines
+                break
+            font_size -= 10
             
-            # Draw word by word to colorize highlight_words
+        if not h_lines:
+            h_lines = [headline[:30], headline[30:60], headline[60:]]
+            h_lines = [l.strip() for l in h_lines if l.strip()]
+            h_font = self._get_font(80, bold=True)
+            font_size = 80
+
+        # 2. CALCULATE TOTAL HEADLINE HEIGHT
+        line_h = draw.textbbox((0,0), 'Ag', font=h_font)[3] - draw.textbbox((0,0), 'Ag', font=h_font)[1]
+        line_gap = int(font_size * 0.18) # 18% of font size between lines
+        total_h_height = len(h_lines) * line_h + (len(h_lines) - 1) * line_gap
+
+        # 3. VERTICAL LAYOUT
+        # Layout centers the whole composition vertically with more weight at top
+        top_pad = int(H * 0.10) # 10% top padding
+        rule_gap = int(font_size * 0.35)
+        rule_h = 5
+        subtext_gap = 40
+        tag_bottom = 60
+
+        # Measure subtext height (will be computed after wrap)
+        s_font = self._get_font(38, bold=False)
+        s_lines = self._wrap_text(draw, subtext, s_font, MAX_W - 40)
+        s_line_h = draw.textbbox((0,0), 'Ag', font=s_font)[3] - draw.textbbox((0,0), 'Ag', font=s_font)[1]
+        total_s_height = len(s_lines) * (s_line_h + 10)
+
+        # Start headline at top_pad
+        y_extra = self._apply_tag_treatment(draw, img, tag, accent, W, H)
+        y = top_pad + y_extra
+
+        # 4. DRAW HEADLINE (word-by-word coloring)
+        for line in h_lines:
+            bb = draw.textbbox((0,0), line, font=h_font)
+            lw = bb[2] - bb[0]
+            x_start = (W - lw) // 2
             words = line.split()
-            curr_x = x_start
+            cx = x_start
             for word in words:
-                clean_word = word.strip(".,!?\"'")
-                color = "#CC0000" if clean_word in highlight_words else "#000000"
-                w_bbox = draw.textbbox((0,0), word, font=h_font)
-                ww = w_bbox[2] - w_bbox[0]
-                draw.text((curr_x, y_offset), word, font=h_font, fill=color)
-                # Space width
-                s_bbox = draw.textbbox((0,0), " ", font=h_font)
-                curr_x += ww + (s_bbox[2] - s_bbox[0])
-            y_offset += lh + 20
+                clean = word.strip(".,!?'\"-")
+                is_hl = any(clean == hw or clean.startswith(hw) for hw in highlight_words)
+                color = accent if is_hl else '#0A0A0A'
+                draw.text((cx, y), word, font=h_font, fill=color)
+                wb = draw.textbbox((0,0), word, font=h_font)
+                sb = draw.textbbox((0,0), ' ', font=h_font)
+                cx += (wb[2] - wb[0]) + (sb[2] - sb[0])
+            y += line_h + line_gap
+            
+        y -= line_gap # remove last gap
 
-        # RED RULE
-        y_offset += 30
-        draw.rectangle([(self.width - 100) // 2, y_offset, (self.width + 100) // 2, y_offset + 4], fill="#CC0000")
-        
-        # SUBTEXT
-        y_offset += 40
-        sub_font = self._get_font(28)
-        sub_bbox = draw.textbbox((0,0), subtext, font=sub_font)
-        sw = sub_bbox[2] - sub_bbox[0]
-        draw.text(((self.width - sw) // 2, y_offset), subtext, font=sub_font, fill="#555555")
-        y_offset += sub_bbox[3] - sub_bbox[1] + 80
+        # 5. RED RULE
+        y += rule_gap
+        rule_w = 80
+        rule_x0 = (W - rule_w) // 2
+        draw.rectangle([rule_x0, y, rule_x0 + rule_w, y + rule_h], fill=accent)
 
-        # 3. CONTENT CARD
-        card_margin = 60
-        card_w = self.width - (card_margin * 2)
-        card_h = 400
-        card_x0 = card_margin
-        card_y0 = y_offset
-        card_x1 = card_x0 + card_w
-        card_y1 = card_y0 + card_h
-        
-        draw.rectangle([card_x0, card_y0, card_x1, card_y1], outline="#DDDDDD", width=3)
-        
-        content_font = self._get_font(36)
-        
-        if tag == "sports":
-            t1 = data.get("team1", "HOME")
-            t2 = data.get("team2", "AWAY")
-            wl = data.get("winner_label", "")
-            perf = data.get("performers", "")
-            last5 = data.get("last5", "")
-            
-            cy = card_y0 + 50
-            
-            vs_text = f"{t1} vs {t2}"
-            vs_bbox = draw.textbbox((0,0), vs_text, font=self._get_font(48))
-            draw.text(((self.width - (vs_bbox[2]-vs_bbox[0])) // 2, cy), vs_text, font=self._get_font(48), fill="#000000")
-            cy += 80
-            
-            if wl:
-                wl_text = f"Winner: {wl}"
-                wl_bbox = draw.textbbox((0,0), wl_text, font=content_font)
-                draw.text(((self.width - (wl_bbox[2]-wl_bbox[0])) // 2, cy), wl_text, font=content_font, fill="#CC0000")
-                cy += 60
-            if perf:
-                perf_text = f"Key Performers: {perf}"
-                draw.text((card_x0 + 40, cy), perf_text, font=content_font, fill="#333333")
-                cy += 60
-            if last5:
-                last_text = f"Last 5: {last5}"
-                draw.text((card_x0 + 40, cy), last_text, font=content_font, fill="#555555")
-        else:
-            # Fallback basic content card
-            cy = card_y0 + 100
-            cx = self.width // 2
-            r = 60
-            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=accent_color)
-            letter = cat_str[0] if cat_str else "N"
-            l_font = self._get_font(70)
-            l_bbox = draw.textbbox((0,0), letter, font=l_font)
-            draw.text((cx - (l_bbox[2]-l_bbox[0])//2, cy - (l_bbox[3]-l_bbox[1])//2 - 15), letter, font=l_font, fill="#FFFFFF")
-            
-            k_text = f"{cat_str} HIGHLIGHTS"
-            k_bbox = draw.textbbox((0,0), k_text, font=content_font)
-            draw.text(((self.width - (k_bbox[2]-k_bbox[0])) // 2, cy + 120), k_text, font=content_font, fill="#333333")
+        # 6. SUBTEXT
+        y += rule_h + subtext_gap
+        for sl in s_lines:
+            sb = draw.textbbox((0,0), sl, font=s_font)
+            sw = sb[2] - sb[0]
+            draw.text(((W - sw) // 2, y), sl, font=s_font, fill='#444444')
+            y += s_line_h + 10
 
+        # 7. TAG BRACKET at bottom
+        t_font = self._get_font(32, bold=False)
+        tag_text = f'[ {tag} ]'
+        tb = draw.textbbox((0,0), tag_text, font=t_font)
+        draw.text(((W - (tb[2]-tb[0])) // 2, H - tag_bottom - (tb[3]-tb[1])),
+                  tag_text, font=t_font, fill='#999999')
+
+        # DATE WATERMARK
+        date_font = self._get_font(24, bold=False)
+        date_str = datetime.now().strftime('%b %d, %Y').upper()
+        draw.text((40, H - 50), date_str, font=date_font, fill='#CCCCCC')
+
+        # 8. SAVE
         os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        img.save(output_path, quality=95)
+        img.save(output_path, 'PNG', quality=95)
         
-        print(f"[RENDER] output={output_path} size={self.width}x{self.height} tag={tag} source=gemini_template")
+        print(f'[RENDER] {output_path} | {font_size}px | {len(h_lines)} lines | tag={tag}')
         return output_path
+
+    def _apply_tag_treatment(self, draw, img, tag, accent, W, H):
+        '''
+        Adds tag-specific visual elements to the top/bottom of the canvas.
+        Called BEFORE drawing the headline.
+        Returns y_offset (how much space the treatment consumed at top).
+        '''
+        from datetime import datetime
+        if tag == 'breaking':
+            # Thin red strip at very top (not a bar — just a 8px line)
+            draw.rectangle([0, 0, W, 8], fill=accent)
+            # BREAKING label top-left in small caps
+            label_font = self._get_font(26, bold=True)
+            draw.text((40, 20), 'BREAKING NEWS', font=label_font, fill=accent)
+            return 65 # extra top padding consumed
+        elif tag == 'finance':
+            # Thin gold rule at top
+            draw.rectangle([0, 0, W, 6], fill=accent)
+            # Small market indicator text top-right
+            label_font = self._get_font(22, bold=False)
+            txt = datetime.now().strftime('%d %b %Y').upper() + ' | MARKETS'
+            tb = draw.textbbox((0,0), txt, font=label_font)
+            draw.text((W - (tb[2]-tb[0]) - 40, 18), txt, font=label_font, fill='#999999')
+            return 55
+        elif tag == 'politics':
+            # Navy thin rule at top
+            draw.rectangle([0, 0, W, 6], fill=accent)
+            return 40
+        elif tag == 'sports':
+            # Thin red rule at top
+            draw.rectangle([0, 0, W, 6], fill=accent)
+            return 40
+        else:
+            # Default: just a thin rule
+            draw.rectangle([0, 0, W, 4], fill='#CCCCCC')
+            return 30
+
+    def _wrap_text(self, draw, text, font, max_width):
+        '''Word-wrap text to max_width. Returns list of lines.'''
+        words = text.split()
+        lines = []
+        cur = []
+        for w in words:
+            cur.append(w)
+            bb = draw.textbbox((0,0), ' '.join(cur), font=font)
+            if (bb[2] - bb[0]) > max_width:
+                cur.pop()
+                if cur:
+                    lines.append(' '.join(cur))
+                cur = [w]
+        if cur:
+            lines.append(' '.join(cur))
+        return lines if lines else [text]
 
 if __name__ == "__main__":
     renderer = ImageRenderer()

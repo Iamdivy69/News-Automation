@@ -81,6 +81,62 @@ class PublishingAgent:
         except Exception as e:
             return False, str(e)
 
+    def publish_article(self, article_id: int) -> dict:
+        '''
+        Publish a single article to all configured platforms.
+        Called by the API when user clicks Approve.
+        '''
+        DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true'
+        result = {'article_id': article_id, 'platforms': {}, 'success': False}
+        try:
+            conn = self._get_conn()
+            with conn.cursor(cursor_factory=DictCursor) as cur:
+                cur.execute('SELECT * FROM articles WHERE id = %s', (article_id,))
+                art = cur.fetchone()
+            if not art:
+                return {'error': 'Article not found'}
+            art = dict(art)
+            captions = art.get('captions') or {}
+            if isinstance(captions, str):
+                try: captions = json.loads(captions)
+                except: captions = {}
+            img_path = art.get('image_url', '')
+            # Convert API URL back to local path for file sending
+            if img_path and img_path.startswith('/api/'):
+                img_path = None # Telegram will use the API URL instead
+            platform_status = {}
+            any_success = False
+            if DRY_RUN:
+                print(f'[PUBLISH] DRY RUN: article {article_id}')
+                platform_status = {'dry_run': 'posted'}
+                any_success = True
+            else:
+                platforms = {
+                    'telegram': self._post_telegram,
+                    'twitter': self._post_twitter,
+                    'instagram': self._post_instagram,
+                    'linkedin': self._post_linkedin,
+                    'facebook': self._post_facebook,
+                }
+                for plat, fn in platforms.items():
+                    cap = captions.get(plat, art.get('headline', ''))
+                    ok, msg = fn(art, cap, img_path)
+                    platform_status[plat] = 'posted' if ok else 'failed'
+                    if ok: any_success = True
+                    result['platforms'][plat] = platform_status[plat]
+            status = 'published' if any_success else 'failed'
+            with conn.cursor() as c:
+                c.execute('''
+                    UPDATE articles SET status=%s, platform_status=%s::jsonb,
+                    published_at=NOW() WHERE id=%s
+                ''', (status, json.dumps(platform_status), article_id))
+            conn.commit()
+            conn.close()
+            result['success'] = any_success
+            return result
+        except Exception as e:
+            return {'error': str(e), 'article_id': article_id}
+
     def run(self):
         DRY_RUN = os.getenv('DRY_RUN', 'false').lower() == 'true'
         metrics = {

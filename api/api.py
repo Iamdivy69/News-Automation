@@ -184,15 +184,18 @@ def get_article_image(article_id):
 
         # Slow path: search all date subfolders under images/
         filename = os.path.basename(image_path)
-        images_root = os.path.join(
-            os.path.abspath(os.path.join(os.path.dirname(__file__), '..')),
-            'images'
-        )
-        for entry in sorted(os.scandir(images_root), key=lambda e: e.name, reverse=True):
-            if entry.is_dir():
-                candidate = os.path.join(entry.path, filename)
-                if os.path.exists(candidate):
-                    return send_file(candidate, mimetype='image/png')
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        search_roots = [
+            os.path.join(project_root, 'images'),
+            os.path.join(project_root, 'output', 'images'),
+        ]
+        for images_root in search_roots:
+            if not os.path.exists(images_root): continue
+            for entry in sorted(os.scandir(images_root), key=lambda e: e.name, reverse=True):
+                if entry.is_dir():
+                    candidate = os.path.join(entry.path, filename)
+                    if os.path.exists(candidate):
+                        return send_file(candidate, mimetype='image/png')
 
         return jsonify({"error": "Image file missing from disk", "path": image_path}), 404
 
@@ -786,14 +789,18 @@ def regenerate_image(article_id):
                 
         with engine.connect() as conn:
             with conn.begin():
-                conn.execute(text("""
-                    UPDATE articles 
-                    SET image_url = :url, image_source = 'gemini_template', image_prompt = :prompt
-                    WHERE id = :id
-                """), {"url": final_url, "prompt": headline_data.get("headline", ""), "id": article_id})
+                conn.execute(text('''
+                    INSERT INTO images (article_id, image_path, image_type)
+                    VALUES (:aid, :path, 'portrait') ON CONFLICT DO NOTHING
+                '''), {'aid': article_id, 'path': local_path})
+                conn.execute(text('''
+                    UPDATE articles SET image_url=:url, image_source='gemini_template',
+                    image_prompt=:prompt WHERE id=:id
+                '''), {'url': '/api/articles/'+str(article_id)+'/image',
+                       'prompt': headline_data.get('headline',''), 'id': article_id})
                 
         return jsonify({
-            "image_url": final_url,
+            "image_url": '/api/articles/'+str(article_id)+'/image',
             "image_source": "gemini_template",
             "headline_data": headline_data
         }), 200

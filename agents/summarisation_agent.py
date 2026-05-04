@@ -49,6 +49,20 @@ class SummarisationAgent:
             
         return True
 
+    def _try_fetch_content(self, url: str, headline: str) -> str:
+        '''Attempt to fetch article content from URL as fallback.'''
+        if not url:
+            return headline
+        try:
+            from newspaper import Article as NewsArticle
+            a = NewsArticle(url)
+            a.download(); a.parse()
+            if a.text and len(a.text) > 100:
+                return a.text[:3000]
+        except Exception:
+            pass
+        return headline
+
     def _generate(self, prompt: str, system: str) -> tuple[str | None, str]:
         payload = {
             "model": self.OLLAMA_MODEL,
@@ -72,19 +86,6 @@ class SummarisationAgent:
             backoff = 2 ** (attempt + 1) # 2s, 4s, 8s
             sleep(backoff)
             
-        if self._gemini_key and self._client:
-            try:
-                gemini_prompt = f"System Instruction: {system}\n\nTask: {prompt}"
-                response = self._client.models.generate_content(
-                    model='gemini-1.5-flash',
-                    contents=gemini_prompt,
-                )
-                text = response.text.strip().strip('"').strip("'")
-                if self._quality_gate(text):
-                    return text, "gemini"
-            except Exception as e:
-                print(f"Gemini fallback error: {e}")
-                
         return None, "failed"
 
     def _generate_summaries(self, headline: str, full_text: str, tone: str) -> dict:
@@ -106,6 +107,30 @@ class SummarisationAgent:
         res["fb"], res["fb_src"] = self._generate(base_text, sys_fb)
         res["tags"], res["tags_src"] = self._generate(base_text, sys_tags)
         
+        if any(src == "failed" for key, src in [(k, v) for k, v in res.items() if k.endswith("_src")]):
+            if self._gemini_key and self._client:
+                try:
+                    gemini_prompt = f'Write 5 social media captions for this news story:\n'
+                    gemini_prompt += f'Headline: {headline}\n'
+                    gemini_prompt += f'Content: {safe_text[:1500]}\n\n'
+                    gemini_prompt += 'Return JSON: {"summary": "string", "twitter": "string", "linkedin": "string", "instagram": "string", "facebook": "string", "hashtags": "string"}'
+                    
+                    response = self._client.models.generate_content(
+                        model='gemini-1.5-flash',
+                        contents=gemini_prompt,
+                    )
+                    text = response.text.strip()
+                    if text.startswith('```json'): text = text[7:-3].strip()
+                    elif text.startswith('```'): text = text[3:-3].strip()
+                    data = json.loads(text)
+                    
+                    for key, mapped in [("summary", "summary"), ("twitter", "twitter"), ("linkedin", "linkedin"), ("ig", "instagram"), ("fb", "facebook"), ("tags", "hashtags")]:
+                        if res[f"{key}_src"] == "failed" and mapped in data and data[mapped]:
+                            res[key] = data[mapped]
+                            res[f"{key}_src"] = "gemini"
+                except Exception as e:
+                    print(f"Bulk Gemini fallback error: {e}")
+        
         return res
 
     def run(self) -> dict:
@@ -116,7 +141,7 @@ class SummarisationAgent:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
                 cur.execute(
-                    "SELECT id, headline, full_text, category, is_breaking "
+                    "SELECT id, headline, full_text, url, category, is_breaking "
                     "FROM articles WHERE top_30_selected = TRUE AND status = 'top30_selected' "
                     "ORDER BY viral_score DESC LIMIT 30"
                 )
@@ -143,7 +168,8 @@ class SummarisationAgent:
                     continue
                     
                 if not full_text or len(full_text) < 50:
-                    full_text = headline
+                    url = article.get('url', '')
+                    full_text = self._try_fetch_content(url, headline)
                 
                 category = article["category"] or ""
                 is_breaking = article["is_breaking"] or False
